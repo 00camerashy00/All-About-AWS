@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UsersModuleReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListUsers",
+        "iam:GetUser",
+        "iam:ListUserPolicies",
+        "iam:GetUserPolicy",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListGroupsForUser",
+        "iam:ListGroupPolicies",
+        "iam:GetGroupPolicy",
+        "iam:ListAttachedGroupPolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicies",
+        "ec2:DescribeInstances",
+        "ec2:DescribeRegions",
+        "ssm:DescribeSessions",
+        "ssm:DescribeInstanceInformation",
+        "cloudtrail:LookupEvents",
+        "sso:ListInstances",
+        "sso:DescribePermissionSet",
+        "sso:ListPermissionSets",
+        "sso:ListAccountAssignments",
+        "sso:GetInlinePolicyForPermissionSet",
+        "sso:ListManagedPoliciesInPermissionSet",
+        "sso:ListCustomerManagedPolicyReferencesInPermissionSet",
+        "identitystore:ListUsers",
+        "identitystore:ListGroups",
+        "identitystore:ListGroupMemberships",
+        "identitystore:DescribeUser",
+        "organizations:ListAccounts",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

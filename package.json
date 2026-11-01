@@ -1,0 +1,46 @@
+{
+  "name": "aws-management-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal AWS management dashboard — resources, users, monitoring, and alarms in plain English.",
+  "scripts": {
+    "dev": "next dev --port 3003",
+    "build": "next build",
+    "start": "next start --port 3003",
+    "lint": "next lint",
+    "test": "node --experimental-strip-types --import ./tests/register.mjs --test tests/users-logic.test.ts tests/monitoring-status.test.ts tests/alarms.test.ts tests/account-keys.test.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudtrail": "^3.1152.0",
+    "@aws-sdk/client-cloudwatch": "^3.1146.0",
+    "@aws-sdk/client-ec2": "^3.1146.0",
+    "@aws-sdk/client-efs": "^3.1146.0",
+    "@aws-sdk/client-elastic-load-balancing": "^3.1146.0",
+    "@aws-sdk/client-elastic-load-balancing-v2": "^3.1146.0",
+    "@aws-sdk/client-iam": "^3.1152.0",
+    "@aws-sdk/client-identitystore": "^3.1152.0",
+    "@aws-sdk/client-organizations": "^3.1152.0",
+    "@aws-sdk/client-rds": "^3.1146.0",
+    "@aws-sdk/client-s3": "^3.1146.0",
+    "@aws-sdk/client-ssm": "^3.1152.0",
+    "@aws-sdk/client-sso-admin": "^3.1152.0",
+    "@aws-sdk/client-sts": "^3.1146.0",
+    "@aws-sdk/client-transfer": "^3.1146.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.454.0",
+    "next": "14.2.18",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.18",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.2"
+  }
+}

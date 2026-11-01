@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f6f7f9;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: #111827;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  @apply bg-white rounded-2xl border border-gray-200/80 shadow-card;
+}
+
+.muted {
+  @apply text-gray-500;
+}
+
+.pill {
+  @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
+}
+
+/* Recharts polish */
+.recharts-cartesian-axis-tick text {
+  font-size: 11px;
+  fill: #6b7280;
+}
+.recharts-tooltip-wrapper {
+  outline: none;
+}

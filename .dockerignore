@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.cursor
+.env
+.env*.local
+*.log
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
+coverage
+terminals
