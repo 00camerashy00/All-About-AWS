@@ -3,13 +3,24 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, Database, HardDrive, RefreshCw, Server, TriangleAlert } from "lucide-react";
-import type { Inventory } from "@/lib/aws-resources";
-import { resources as mockResources } from "@/lib/mock-data";
+import type { Health, Inventory, LiveBucket, LiveDatabase, LiveEFS, LiveSnapshot, LiveVolume } from "@/lib/aws-resources";
+import { resources as mockResources, type AwsResource } from "@/lib/mock-data";
 import { useAccount } from "@/components/account-provider";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { InsightBanner } from "@/components/insight-banner";
 import { HealthTip } from "@/components/health-tip";
+import { FilterTable, type FilterColumn } from "@/components/filter-table";
+import { detailScanned, scopeScanned } from "@/lib/inventory-merge";
+import {
+  PROVISION_CHOICES,
+  ec2Provision,
+  ec2ProvisionDetail,
+  rdsProvision,
+  rdsProvisionDetail,
+  unknownProvision,
+  type ProvisionLabel,
+} from "@/lib/provision";
 
 type Tab = "servers" | "databases" | "storage" | "attention";
 
@@ -32,6 +43,433 @@ function Fold({ title, detail, children }: { title: string; detail: string; chil
       {open && children}
     </section>
   );
+}
+
+function healthName(status: string): string {
+  if (status === "healthy") return "Healthy";
+  if (status === "attention") return "Needs attention";
+  if (status === "critical") return "Critical";
+  return status;
+}
+
+function ProvisionCell({ label, detail }: { label: ProvisionLabel; detail: string }) {
+  const tone =
+    label === "Under-provisioned"
+      ? "bg-red-50 text-red-700 ring-red-200"
+      : label === "Over-provisioned"
+        ? "bg-amber-50 text-amber-800 ring-amber-200"
+        : label === "Right-sized"
+          ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+          : "bg-gray-100 text-gray-500 ring-gray-200";
+  return (
+    <span title={detail} className={`pill ring-1 ${tone}`}>
+      {label}
+    </span>
+  );
+}
+
+type ServerRow = {
+  id: string;
+  name: string;
+  type: string;
+  region: string;
+  state: string;
+  cpuAvg7d: number | null;
+  status: Health;
+  flags: string[];
+};
+
+type SnapGroup = {
+  key: string;
+  source: string;
+  store: "ebs" | "rds";
+  region: string;
+  count: number;
+  oldest: number;
+  items: LiveSnapshot[];
+};
+
+const serverColumns: FilterColumn<ServerRow>[] = [
+  {
+    id: "server",
+    label: "Server",
+    kind: "text",
+    text: (row) => `${row.name} ${row.id}`,
+    render: (row) => (
+      <>
+        <Link href={`/resources/${row.id}`} className="font-medium text-gray-900 hover:underline">
+          {row.name || row.id}
+        </Link>
+        <p className="font-mono text-xs text-gray-400">{row.id}</p>
+      </>
+    ),
+  },
+  { id: "type", label: "Type", kind: "text", text: (row) => row.type, render: (row) => row.type },
+  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  {
+    id: "state",
+    label: "State · CPU (7d)",
+    kind: "choice",
+    text: (row) => row.state,
+    render: (row) => (
+      <>
+        {row.state}
+        {row.cpuAvg7d !== null ? ` · ${row.cpuAvg7d}%` : ""}
+      </>
+    ),
+  },
+  {
+    id: "health",
+    label: "Health",
+    kind: "choice",
+    text: (row) => healthName(row.status),
+    render: (row) => <HealthTip status={row.status} flags={row.flags} />,
+  },
+  {
+    id: "provision",
+    label: "Provision",
+    kind: "choice",
+    choices: [...PROVISION_CHOICES],
+    text: (row) => ec2Provision(row.state, row.cpuAvg7d),
+    render: (row) => (
+      <ProvisionCell label={ec2Provision(row.state, row.cpuAvg7d)} detail={ec2ProvisionDetail(row.state, row.cpuAvg7d)} />
+    ),
+  },
+];
+
+function liveDbProvision(row: LiveDatabase): ProvisionLabel {
+  return rdsProvision({
+    available: row.status === "available",
+    cpu: row.cpuAvg7d ?? null,
+    storageUsedPct: row.storageUsedPct,
+    connectionPct: row.connectionPct ?? null,
+  });
+}
+
+function storageUsedText(row: LiveDatabase): string {
+  if (row.storageUsedPct !== null && row.storageGb !== null) return `${row.storageUsedPct}% of ${row.storageGb} GB`;
+  if (row.storageGb !== null) return `${row.storageGb} GB allocated`;
+  return "—";
+}
+
+function backupText(row: LiveDatabase): string {
+  const base = row.backupRetentionDays !== null ? `${row.backupRetentionDays}d retention` : "—";
+  return row.manualSnapshots > 0 ? `${base} ${row.manualSnapshots} manual snapshots` : base;
+}
+
+const databaseColumns: FilterColumn<LiveDatabase>[] = [
+  {
+    id: "database",
+    label: "Database",
+    kind: "text",
+    text: (row) => `${row.id} ${row.status}`,
+    render: (row) => (
+      <>
+        <Link href={`/resources/${row.id}`} className="font-medium text-gray-900 hover:underline">
+          {row.id}
+        </Link>
+        <p className="text-xs text-gray-400">{row.status}</p>
+      </>
+    ),
+  },
+  {
+    id: "engine",
+    label: "Engine / Size",
+    kind: "text",
+    text: (row) => `${row.engine} ${row.class}${row.multiAz ? " Multi-AZ" : ""}`,
+    render: (row) => (
+      <>
+        {row.engine}
+        <p className="text-xs text-gray-400">
+          {row.class}
+          {row.multiAz ? " · Multi-AZ" : ""}
+        </p>
+      </>
+    ),
+  },
+  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "storage", label: "Storage used", kind: "text", text: storageUsedText, render: storageUsedText },
+  {
+    id: "backups",
+    label: "Backups",
+    kind: "text",
+    text: backupText,
+    render: (row) => (
+      <>
+        {row.backupRetentionDays !== null ? `${row.backupRetentionDays}d retention` : "—"}
+        {row.manualSnapshots > 0 && <p className="text-xs text-gray-400">{row.manualSnapshots} manual snapshots</p>}
+      </>
+    ),
+  },
+  {
+    id: "health",
+    label: "Health",
+    kind: "choice",
+    text: (row) => healthName(row.statusLevel),
+    render: (row) => <HealthTip status={row.statusLevel} flags={row.flags} />,
+  },
+  {
+    id: "provision",
+    label: "Provision",
+    kind: "choice",
+    choices: [...PROVISION_CHOICES],
+    text: liveDbProvision,
+    render: (row) => (
+      <ProvisionCell
+        label={liveDbProvision(row)}
+        detail={rdsProvisionDetail({
+          available: row.status === "available",
+          cpu: row.cpuAvg7d ?? null,
+          storageUsedPct: row.storageUsedPct,
+          connectionPct: row.connectionPct ?? null,
+        })}
+      />
+    ),
+  },
+];
+
+function demoDbProvision(row: AwsResource): ProvisionLabel {
+  return rdsProvision({ available: true, cpu: row.cpu, storageUsedPct: row.storage, connectionPct: null });
+}
+
+const demoDatabaseColumns: FilterColumn<AwsResource>[] = [
+  {
+    id: "database",
+    label: "Database",
+    kind: "text",
+    text: (row) => `${row.name} ${row.id} ${row.insight}`,
+    render: (row) => (
+      <>
+        <Link href={`/resources/${row.id}`} className="font-medium text-gray-900 hover:underline">
+          {row.name}
+        </Link>
+        <p className="text-xs text-gray-400">{row.insight}</p>
+      </>
+    ),
+  },
+  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  {
+    id: "storage",
+    label: "Storage used",
+    kind: "text",
+    text: (row) => `${row.storage}%`,
+    render: (row) => `${row.storage}%`,
+  },
+  {
+    id: "health",
+    label: "Health",
+    kind: "choice",
+    text: (row) => healthName(row.status),
+    render: (row) => <HealthTip status={row.status} flags={[row.insight]} />,
+  },
+  {
+    id: "provision",
+    label: "Provision",
+    kind: "choice",
+    choices: [...PROVISION_CHOICES],
+    text: demoDbProvision,
+    render: (row) => (
+      <ProvisionCell
+        label={demoDbProvision(row)}
+        detail={rdsProvisionDetail({
+          available: true,
+          cpu: row.cpu,
+          storageUsedPct: row.storage,
+          connectionPct: null,
+        })}
+      />
+    ),
+  },
+];
+
+const BUCKET_PROVISION_DETAIL =
+  "No configured capacity limit was returned, so this bucket is not marked over- or under-provisioned.";
+
+const bucketColumns: FilterColumn<LiveBucket>[] = [
+  {
+    id: "bucket",
+    label: "Bucket",
+    kind: "text",
+    text: (row) => `${row.name} versioning ${row.versioning}`,
+    render: (row) => (
+      <>
+        <Link href={`/resources/${row.name}`} className="font-medium text-gray-900 hover:underline">
+          {row.name}
+        </Link>
+        <p className="text-xs text-gray-400">versioning {row.versioning}</p>
+      </>
+    ),
+  },
+  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  {
+    id: "size",
+    label: "Size / Objects",
+    kind: "text",
+    text: (row) => `${row.sizeGb} GB ${row.objects} objects${row.estimated ? " estimated" : ""}`,
+    render: (row) => (
+      <>
+        {row.sizeGb} GB · {row.objects.toLocaleString()} objects{row.estimated ? " (20k+ counted)" : ""}
+      </>
+    ),
+  },
+  {
+    id: "cleanup",
+    label: "Cleanup rules",
+    kind: "choice",
+    text: (row) => (row.lifecycle ? "Rules on" : "No rules"),
+    render: (row) =>
+      row.lifecycle ? (
+        <span className="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">Rules on</span>
+      ) : (
+        <span className="pill bg-amber-50 text-amber-800 ring-1 ring-amber-200">No rules</span>
+      ),
+  },
+  {
+    id: "health",
+    label: "Health",
+    kind: "choice",
+    text: (row) => healthName(row.statusLevel),
+    render: (row) => <HealthTip status={row.statusLevel} flags={row.flags} />,
+  },
+  {
+    id: "provision",
+    label: "Provision",
+    kind: "choice",
+    choices: [...PROVISION_CHOICES],
+    text: () => unknownProvision(),
+    render: () => <ProvisionCell label={unknownProvision()} detail={BUCKET_PROVISION_DETAIL} />,
+  },
+];
+
+const demoBucketColumns: FilterColumn<AwsResource>[] = [
+  {
+    id: "bucket",
+    label: "Bucket",
+    kind: "text",
+    text: (row) => `${row.name} ${row.id} ${row.insight}`,
+    render: (row) => (
+      <>
+        <Link href={`/resources/${row.id}`} className="font-medium text-gray-900 hover:underline">
+          {row.name}
+        </Link>
+        <p className="text-xs text-gray-400">{row.insight}</p>
+      </>
+    ),
+  },
+  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  {
+    id: "health",
+    label: "Health",
+    kind: "choice",
+    text: (row) => healthName(row.status),
+    render: (row) => <HealthTip status={row.status} flags={[row.insight]} />,
+  },
+  {
+    id: "provision",
+    label: "Provision",
+    kind: "choice",
+    choices: [...PROVISION_CHOICES],
+    text: () => unknownProvision(),
+    render: () => <ProvisionCell label={unknownProvision()} detail={BUCKET_PROVISION_DETAIL} />,
+  },
+];
+
+const fileSystemColumns: FilterColumn<LiveEFS>[] = [
+  {
+    id: "name",
+    label: "File system",
+    kind: "text",
+    text: (row) => `${row.name} ${row.id}`,
+    render: (row) => (
+      <>
+        <span className="block font-medium text-gray-900">{row.name}</span>
+        <span className="block font-mono text-xs text-gray-400">{row.id}</span>
+      </>
+    ),
+  },
+  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "size", label: "Size", kind: "text", text: (row) => `${row.sizeGb} GB`, render: (row) => `${row.sizeGb} GB` },
+];
+
+function diskColumns(instances: { id: string; name: string }[]): FilterColumn<LiveVolume>[] {
+  const attached = (row: LiveVolume) => {
+    if (!row.attachedTo) return "Not attached";
+    return instances.find((instance) => instance.id === row.attachedTo)?.name || row.attachedTo;
+  };
+  return [
+    {
+      id: "disk",
+      label: "Disk",
+      kind: "text",
+      text: (row) => `${row.id} ${row.type}`,
+      render: (row) => (
+        <>
+          <span className="font-mono text-xs text-gray-900">{row.id}</span>
+          <p className="font-sans text-xs text-gray-400">{row.type}</p>
+        </>
+      ),
+    },
+    { id: "size", label: "Size", kind: "text", text: (row) => `${row.sizeGb} GB`, render: (row) => `${row.sizeGb} GB` },
+    { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+    {
+      id: "attached",
+      label: "Attached to",
+      kind: "text",
+      text: attached,
+      render: (row) =>
+        row.attachedTo ? attached(row) : <span className="font-medium text-amber-700">Not attached</span>,
+    },
+    { id: "age", label: "Age", kind: "text", text: (row) => `${row.ageDays}d`, render: (row) => `${row.ageDays}d` },
+  ];
+}
+
+const snapshotItemColumns: FilterColumn<LiveSnapshot>[] = [
+  { id: "id", label: "Snapshot", kind: "text", text: (row) => row.id, render: (row) => <span className="font-mono text-xs">{row.id}</span> },
+  { id: "size", label: "Size", kind: "text", text: (row) => `${row.sizeGb} GB`, render: (row) => `${row.sizeGb} GB` },
+  { id: "age", label: "Age", kind: "text", text: (row) => `${row.ageDays}d`, render: (row) => `${row.ageDays}d old` },
+];
+
+function snapshotColumns(
+  openSnap: string | null,
+  setOpenSnap: (value: string | null) => void
+): FilterColumn<SnapGroup>[] {
+  return [
+    {
+      id: "source",
+      label: "Source",
+      kind: "text",
+      text: (row) => row.source,
+      render: (row) => {
+        const open = openSnap === row.key;
+        return (
+          <button
+            type="button"
+            onClick={() => setOpenSnap(open ? null : row.key)}
+            aria-expanded={open}
+            className="text-left font-medium text-gray-900 hover:underline"
+          >
+            {row.source || "Unknown source"}
+          </button>
+        );
+      },
+    },
+    {
+      id: "kind",
+      label: "Kind",
+      kind: "choice",
+      text: (row) => (row.store === "ebs" ? "Disk backup" : "Database backup"),
+      render: (row) => (row.store === "ebs" ? "Disk backup" : "Database backup"),
+    },
+    { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+    { id: "oldest", label: "Oldest", kind: "text", text: (row) => `${row.oldest}d`, render: (row) => `${row.oldest}d` },
+    {
+      id: "count",
+      label: "Count",
+      kind: "text",
+      text: (row) => String(row.count),
+      render: (row) => <span className="font-semibold text-gray-900">{row.count}</span>,
+    },
+  ];
 }
 
 export default function ResourcesPage() {
@@ -89,8 +527,13 @@ export default function ResourcesPage() {
   const q = query.toLowerCase();
   const match = (s: string) => s.toLowerCase().includes(q);
 
+  const serversLive = scopeScanned(inv, "ec2");
+  const databasesLive = scopeScanned(inv, "rds");
+  const bucketsLive = scopeScanned(inv, "s3");
+  const extrasLive = detailScanned(inv);
+
   const servers = useMemo(() => {
-    const base = inv
+    const base = serversLive && inv
       ? inv.instances.filter((r) =>
           match(`${r.name} ${r.id} ${r.type} ${r.region} ${r.state}`)
         )
@@ -112,28 +555,29 @@ export default function ResourcesPage() {
           }))
           .filter((r) => match(`${r.name} ${r.id} ${r.region}`));
     return base;
-  }, [inv, query]);
+  }, [inv, query, serversLive]);
 
   const databases = useMemo(() => {
-    if (!inv) return [];
+    if (!databasesLive || !inv) return [];
     return inv.databases.filter((d) => match(`${d.id} ${d.engine} ${d.class} ${d.region}`));
-  }, [inv, query]);
+  }, [inv, query, databasesLive]);
 
   const buckets = useMemo(() => {
-    if (!inv) return [];
+    if (!bucketsLive || !inv) return [];
     return inv.buckets.filter((b) => match(`${b.name} ${b.region}`));
-  }, [inv, query]);
+  }, [inv, query, bucketsLive]);
 
   const disks = useMemo(() => {
-    if (!inv) return [];
+    if (!extrasLive || !inv) return [];
     return inv.volumes
       .filter((volume) => match(`${volume.id} ${volume.region} ${volume.attachedTo ?? ""} ${volume.type}`))
       .slice()
       .sort((a, b) => Number(Boolean(a.attachedTo)) - Number(Boolean(b.attachedTo)) || b.sizeGb - a.sizeGb);
-  }, [inv, query]);
+  }, [extrasLive, inv, query]);
 
   const snapshotGroups = useMemo(() => {
     const groups = new Map<string, Inventory["snapshots"]>();
+    if (!extrasLive) return [];
     for (const snap of inv?.snapshots ?? []) {
       if (!match(`${snap.id} ${snap.source} ${snap.region}`)) continue;
       const key = `${snap.store}/${snap.region}/${snap.source || snap.id}`;
@@ -159,22 +603,45 @@ export default function ResourcesPage() {
     });
     rows.sort((a, b) => b.count - a.count);
     return rows;
-  }, [inv, query]);
+  }, [extrasLive, inv, query]);
+
+  const fileSystems = useMemo(() => {
+    if (!extrasLive || !inv) return [];
+    return inv.efs.filter((file) => match(`${file.name} ${file.id} ${file.region}`));
+  }, [inv, query, extrasLive]);
 
   const demoFlagged = mockResources.filter((item) => item.status !== "healthy" && match(`${item.name} ${item.id} ${item.insight}`));
   const demoDatabases = mockResources.filter((item) => item.kind === "rds" && match(`${item.name} ${item.id}`));
   const demoBuckets = mockResources.filter((item) => item.kind === "s3" && match(`${item.name} ${item.id}`));
+  const pendingDemo = demoFlagged.filter((item) =>
+    item.kind === "ec2" ? !serversLive : item.kind === "rds" ? !databasesLive : !bucketsLive
+  );
+  const liveFlagged = (inv?.waste ?? []).filter((item) => item.severity !== "healthy");
 
-  const wasteCount = inv?.waste.length ?? mockResources.filter((r) => r.status !== "healthy").length;
-  const serverTotal = inv ? inv.instances.length : mockResources.filter((r) => r.kind === "ec2").length;
-  const serverOk = inv
+  const wasteCount = inv
+    ? liveFlagged.length + pendingDemo.length
+    : mockResources.filter((r) => r.status !== "healthy").length;
+  const serverTotal = serversLive && inv ? inv.instances.length : mockResources.filter((r) => r.kind === "ec2").length;
+  const serverOk = serversLive && inv
     ? inv.instances.filter((i) => i.state === "running").length
     : mockResources.filter((r) => r.kind === "ec2" && r.status === "healthy").length;
-  const dbTotal = inv ? inv.databases.length : mockResources.filter((r) => r.kind === "rds").length;
-  const dbOk = inv
+  const dbTotal = databasesLive && inv ? inv.databases.length : mockResources.filter((r) => r.kind === "rds").length;
+  const dbOk = databasesLive && inv
     ? inv.databases.filter((d) => d.status === "available").length
     : mockResources.filter((r) => r.kind === "rds" && r.status === "healthy").length;
-  const bucketTotal = inv ? inv.buckets.length : mockResources.filter((r) => r.kind === "s3").length;
+  const bucketTotal = bucketsLive && inv ? inv.buckets.length : mockResources.filter((r) => r.kind === "s3").length;
+  const serverCaption =
+    serversLive && inv
+      ? extrasLive
+        ? `${serverOk} running · ${inv.lbs.length} load balancers`
+        : `${serverOk} running`
+      : `${serverOk} running normally`;
+  const bucketCaption =
+    bucketsLive && inv
+      ? inv.buckets.filter((bucket) => !bucket.lifecycle).length
+        ? `${inv.buckets.filter((bucket) => !bucket.lifecycle).length} without cleanup rules`
+        : "Cleanup rules are on"
+      : "File storage in this sample";
   const catalog = Math.max(1, serverTotal + dbTotal + bucketTotal);
 
   return (
@@ -195,15 +662,6 @@ export default function ResourcesPage() {
                 Rescan
               </button>
             )}
-            {inv ? (
-              <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
-                Live AWS data
-              </span>
-            ) : (
-              <span className="rounded-full bg-gray-100 px-3 py-1.5 text-xs font-semibold text-gray-500 ring-1 ring-gray-200">
-                Demo data
-              </span>
-            )}
           </span>
         }
       />
@@ -220,259 +678,136 @@ export default function ResourcesPage() {
       )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Servers" value={`${serverTotal}`} caption={inv ? `${serverOk} running · ${inv.lbs.length} load balancers` : `${serverOk} running normally`} pct={serverTotal ? (serverOk / serverTotal) * 100 : 0} tone="slate" icon={Server} active={tab === "servers"} onClick={() => openTab("servers")} />
-        <StatCard label="Databases" value={`${dbTotal}`} caption={`${dbOk} ${inv ? "available" : "need no decision"}`} pct={dbTotal ? (dbOk / dbTotal) * 100 : 0} tone="amber" icon={Database} active={tab === "databases"} onClick={() => openTab("databases")} />
-        <StatCard label="Buckets" value={`${bucketTotal}`} caption={inv ? (inv.buckets.filter((bucket) => !bucket.lifecycle).length ? `${inv.buckets.filter((bucket) => !bucket.lifecycle).length} without cleanup rules` : "Cleanup rules are on") : "File storage in this sample"} pct={bucketTotal ? 100 : 0} tone="yellow" icon={HardDrive} active={tab === "storage"} onClick={() => openTab("storage")} />
+        <StatCard label="Servers" value={`${serverTotal}`} caption={serverCaption} pct={serverTotal ? (serverOk / serverTotal) * 100 : 0} tone="slate" icon={Server} active={tab === "servers"} onClick={() => openTab("servers")} />
+        <StatCard label="Databases" value={`${dbTotal}`} caption={`${dbOk} ${databasesLive && inv ? "available" : "need no decision"}`} pct={dbTotal ? (dbOk / dbTotal) * 100 : 0} tone="amber" icon={Database} active={tab === "databases"} onClick={() => openTab("databases")} />
+        <StatCard label="Buckets" value={`${bucketTotal}`} caption={bucketCaption} pct={bucketTotal ? 100 : 0} tone="yellow" icon={HardDrive} active={tab === "storage"} onClick={() => openTab("storage")} />
         <StatCard label="Needs attention" value={`${wasteCount}`} caption={wasteCount ? "Open this card for the reason" : "Nothing flagged"} pct={(wasteCount / catalog) * 100} tone="red" icon={TriangleAlert} active={tab === "attention"} onClick={() => openTab("attention")} />
       </div>
 
       {tab === "servers" && (
-        <div className="card mt-3 overflow-hidden lg:overflow-visible">
-          <div className="overflow-x-auto lg:overflow-visible">
-            <table className="w-full min-w-[820px] text-left text-sm">
-              <thead>
-                <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-gray-400">
-                  <th className="px-4 py-3 font-medium">Server</th>
-                  <th className="px-4 py-3 font-medium">Type</th>
-                  <th className="px-4 py-3 font-medium">Region</th>
-                  <th className="px-4 py-3 font-medium">State · CPU (7d)</th>
-                  <th className="px-4 py-3 font-medium">Health</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {servers.map((r) => (
-                  <tr key={r.id} className="hover:bg-gray-50/70">
-                    <td className="px-4 py-3">
-                      <Link href={`/resources/${r.id}`} className="font-medium hover:underline">
-                        {r.name || r.id}
-                      </Link>
-                      <p className="font-mono text-xs text-gray-400">{r.id}</p>
-                    </td>
-                    <td className="px-4 py-3 text-gray-600">{r.type}</td>
-                    <td className="px-4 py-3 text-gray-600">{r.region}</td>
-                    <td className="px-4 py-3 text-gray-600">
-                      {r.state}{r.cpuAvg7d !== null ? ` · ${r.cpuAvg7d}%` : ""}
-                    </td>
-                    <td className="px-4 py-3"><HealthTip status={r.status} flags={r.flags} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {servers.length === 0 && !loading && (
-            <p className="muted p-8 text-center text-sm">No servers match.</p>
-          )}
+        <div className="card mt-3 overflow-hidden">
+          <FilterTable
+            rows={servers}
+            rowKey={(row) => row.id}
+            minWidth={980}
+            empty={loading ? "Scanning…" : "No servers match."}
+            columns={serverColumns}
+          />
         </div>
       )}
 
       {tab === "databases" && (
-        <div className="card mt-3 overflow-hidden lg:overflow-visible">
-          {!inv ? (
-            <ul className="divide-y divide-gray-100">
-              {demoDatabases.map((item) => (
-                <li key={item.id}>
-                  <Link href={`/resources/${item.id}`} className="block px-4 py-3 hover:bg-gray-50">
-                    <span className="block text-sm font-medium">{item.name}</span>
-                    <span className="block text-xs text-gray-500">{item.insight}</span>
-                  </Link>
-                </li>
-              ))}
-              {demoDatabases.length === 0 && <li className="muted p-8 text-center text-sm">No databases match.</li>}
-            </ul>
+        <div className="card mt-3 overflow-hidden">
+          {!(databasesLive && inv) ? (
+            <FilterTable
+              rows={demoDatabases}
+              rowKey={(row) => row.id}
+              minWidth={860}
+              empty="No databases match."
+              columns={demoDatabaseColumns}
+            />
           ) : (
-            <div className="overflow-x-auto lg:overflow-visible">
-              <table className="w-full min-w-[840px] text-left text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-gray-400">
-                    <th className="px-4 py-3 font-medium">Database</th>
-                    <th className="px-4 py-3 font-medium">Engine / Size</th>
-                    <th className="px-4 py-3 font-medium">Region</th>
-                    <th className="px-4 py-3 font-medium">Storage used</th>
-                    <th className="px-4 py-3 font-medium">Backups</th>
-                    <th className="px-4 py-3 font-medium">Health</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {databases.map((d) => (
-                    <tr key={`${d.region}/${d.id}`} className="hover:bg-gray-50/70">
-                      <td className="px-4 py-3">
-                        <Link href={`/resources/${d.id}`} className="font-medium hover:underline">{d.id}</Link>
-                        <p className="text-xs text-gray-400">{d.status}</p>
-                      </td>
-                      <td className="px-4 py-3 text-gray-600">{d.engine}<p className="text-xs text-gray-400">{d.class}{d.multiAz ? " · Multi-AZ" : ""}</p></td>
-                      <td className="px-4 py-3 text-gray-600">{d.region}</td>
-                      <td className="px-4 py-3 text-gray-600">
-                        {d.storageUsedPct !== null ? `${d.storageUsedPct}% of ${d.storageGb} GB` : d.storageGb !== null ? `${d.storageGb} GB allocated` : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-gray-600">
-                        {d.backupRetentionDays !== null ? `${d.backupRetentionDays}d retention` : "—"}
-                        {d.manualSnapshots > 0 && <p className="text-xs text-gray-400">{d.manualSnapshots} manual snapshots</p>}
-                      </td>
-                      <td className="px-4 py-3"><HealthTip status={d.statusLevel} flags={d.flags} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {inv && databases.length === 0 && (
-            <p className="muted p-8 text-center text-sm">No databases match.</p>
+            <FilterTable
+              rows={databases}
+              rowKey={(row) => `${row.region}/${row.id}`}
+              minWidth={1040}
+              empty="No databases match."
+              columns={databaseColumns}
+            />
           )}
         </div>
       )}
 
       {tab === "storage" && (
         <div className="mt-3 space-y-3">
-          {!inv ? (
+          {!(bucketsLive && inv) ? (
             <div className="card overflow-hidden">
-              <ul className="divide-y divide-gray-100">
-                {demoBuckets.map((item) => (
-                  <li key={item.id}>
-                    <Link href={`/resources/${item.id}`} className="block px-4 py-3 hover:bg-gray-50">
-                      <span className="block text-sm font-medium">{item.name}</span>
-                      <span className="block text-xs text-gray-500">{item.insight}</span>
-                    </Link>
-                  </li>
-                ))}
-                {demoBuckets.length === 0 && <li className="muted p-8 text-center text-sm">No buckets match.</li>}
-              </ul>
+              <FilterTable
+                rows={demoBuckets}
+                rowKey={(row) => row.id}
+                minWidth={860}
+                empty="No buckets match."
+                columns={demoBucketColumns}
+              />
             </div>
           ) : (
             <>
-              <section className="card overflow-hidden lg:overflow-visible">
+              <section className="card overflow-hidden">
                 <div className="border-b border-gray-100 px-4 py-3">
                   <p className="text-sm font-semibold">Buckets ({buckets.length})</p>
                   <p className="text-xs text-gray-500">S3 file buckets only. The count matches this list.</p>
                 </div>
-                <div className="overflow-x-auto lg:overflow-visible">
-                  <table className="w-full min-w-[800px] text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-gray-400">
-                        <th className="px-4 py-3 font-medium">Bucket</th>
-                        <th className="px-4 py-3 font-medium">Region</th>
-                        <th className="px-4 py-3 font-medium">Size / Objects</th>
-                        <th className="px-4 py-3 font-medium">Cleanup rules</th>
-                        <th className="px-4 py-3 font-medium">Health</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {buckets.map((b) => (
-                        <tr key={b.name} className="hover:bg-gray-50/70">
-                          <td className="px-4 py-3">
-                            <Link href={`/resources/${b.name}`} className="font-medium hover:underline">{b.name}</Link>
-                            <p className="text-xs text-gray-400">versioning {b.versioning}</p>
-                          </td>
-                          <td className="px-4 py-3 text-gray-600">{b.region}</td>
-                          <td className="px-4 py-3 text-gray-600">
-                            {b.sizeGb} GB · {b.objects.toLocaleString()} objects{b.estimated ? " (20k+ counted)" : ""}
-                          </td>
-                          <td className="px-4 py-3">
-                            {b.lifecycle ? (
-                              <span className="pill bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">Rules on</span>
-                            ) : (
-                              <span className="pill bg-amber-50 text-amber-800 ring-1 ring-amber-200">No rules</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3"><HealthTip status={b.statusLevel} flags={b.flags} /></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {buckets.length === 0 && <p className="muted p-8 text-center text-sm">No buckets match.</p>}
+                <FilterTable
+                  rows={buckets}
+                  rowKey={(row) => row.name}
+                  minWidth={980}
+                  empty="No buckets match."
+                  columns={bucketColumns}
+                />
               </section>
 
-              {inv.efs.filter((file) => match(`${file.name} ${file.region}`)).length > 0 && (
+              {extrasLive ? (
+              <>
+              {fileSystems.length > 0 && (
                 <Fold
-                  title={`File systems (${inv.efs.filter((file) => match(`${file.name} ${file.region}`)).length})`}
+                  title={`File systems (${fileSystems.length})`}
                   detail="Shared drives. These are not buckets, so they are not included in the count above."
                 >
-                  <ul className="divide-y divide-gray-100 border-t border-gray-100">
-                    {inv.efs.filter((file) => match(`${file.name} ${file.region}`)).map((file) => (
-                      <li key={file.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
-                        <span>
-                          <span className="block font-medium">{file.name}</span>
-                          <span className="block text-xs text-gray-500">{file.region}</span>
-                        </span>
-                        <span className="text-gray-600">{file.sizeGb} GB</span>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="border-t border-gray-100">
+                    <FilterTable
+                      rows={fileSystems}
+                      rowKey={(row) => row.id}
+                      minWidth={640}
+                      empty="No file systems match."
+                      columns={fileSystemColumns}
+                    />
+                  </div>
                 </Fold>
               )}
 
               <Fold title={`Disks (${disks.length})`} detail="Server disks. A disk belongs to a server, not to a bucket. Unattached disks are listed first.">
-                <div className="overflow-x-auto border-t border-gray-100">
-                  <table className="w-full min-w-[720px] text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-gray-400">
-                        <th className="px-4 py-3 font-medium">Disk</th>
-                        <th className="px-4 py-3 font-medium">Size</th>
-                        <th className="px-4 py-3 font-medium">Region</th>
-                        <th className="px-4 py-3 font-medium">Attached to</th>
-                        <th className="px-4 py-3 font-medium">Age</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {disks.map((volume) => {
-                        const server = volume.attachedTo ? inv.instances.find((instance) => instance.id === volume.attachedTo) : null;
-                        return (
-                          <tr key={`${volume.region}/${volume.id}`}>
-                            <td className="px-4 py-3 font-mono text-xs">{volume.id}<p className="font-sans text-xs text-gray-400">{volume.type}</p></td>
-                            <td className="px-4 py-3">{volume.sizeGb} GB</td>
-                            <td className="px-4 py-3 text-gray-600">{volume.region}</td>
-                            <td className="px-4 py-3 text-gray-600">
-                              {volume.attachedTo ? (server?.name || volume.attachedTo) : <span className="font-medium text-amber-700">Not attached</span>}
-                            </td>
-                            <td className="px-4 py-3 text-gray-600">{volume.ageDays}d</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                <div className="border-t border-gray-100">
+                  <FilterTable
+                    rows={disks}
+                    rowKey={(row) => `${row.region}/${row.id}`}
+                    minWidth={760}
+                    empty="No disks match."
+                    columns={diskColumns(inv.instances)}
+                  />
                 </div>
-                {disks.length === 0 && <p className="muted p-8 text-center text-sm">No disks match.</p>}
               </Fold>
 
               <Fold
                 title={`Snapshots (${snapshotGroups.reduce((total, group) => total + group.count, 0)})`}
                 detail={`${snapshotGroups.filter((group) => group.store === "ebs").reduce((total, group) => total + group.count, 0)} disk backups · ${snapshotGroups.filter((group) => group.store === "rds").reduce((total, group) => total + group.count, 0)} database backups. Open this section, then a row, to see each snapshot.`}
               >
-                <ul className="divide-y divide-gray-100 border-t border-gray-100">
-                  {snapshotGroups.map((group) => {
-                    const open = openSnap === group.key;
-                    return (
-                      <li key={group.key}>
-                        <button
-                          type="button"
-                          onClick={() => setOpenSnap(open ? null : group.key)}
-                          aria-expanded={open}
-                          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50"
-                        >
-                          <span>
-                            <span className="block text-sm font-medium">{group.source || "Unknown source"}</span>
-                            <span className="block text-xs text-gray-500">
-                              {group.store === "ebs" ? "Disk backup" : "Database backup"} · {group.region} · oldest {group.oldest}d
-                            </span>
-                          </span>
-                          <span className="shrink-0 text-sm font-semibold text-gray-700">{group.count}</span>
-                        </button>
-                        {open && (
-                          <ul className="border-t border-gray-100 bg-gray-50/70">
-                            {group.items.map((snap) => (
-                              <li key={`${snap.region}/${snap.id}`} className="flex items-center justify-between gap-3 px-4 py-2 text-xs text-gray-600">
-                                <span className="font-mono">{snap.id}</span>
-                                <span>{snap.sizeGb} GB · {snap.ageDays}d old</span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-                {snapshotGroups.length === 0 && <p className="muted p-8 text-center text-sm">No snapshots match.</p>}
+                <div className="border-t border-gray-100">
+                  <FilterTable
+                    rows={snapshotGroups}
+                    rowKey={(row) => row.key}
+                    minWidth={760}
+                    empty="No snapshots match."
+                    columns={snapshotColumns(openSnap, setOpenSnap)}
+                    detail={(group) =>
+                      openSnap === group.key ? (
+                        <FilterTable
+                          rows={group.items}
+                          rowKey={(snap) => `${snap.region}/${snap.id}`}
+                          minWidth={480}
+                          empty="No snapshots in this group."
+                          columns={snapshotItemColumns}
+                        />
+                      ) : null
+                    }
+                  />
+                </div>
               </Fold>
+              </>
+              ) : (
+                <p className="card px-4 py-3 text-sm text-gray-500">
+                  Disks, snapshots, and file systems have not been scanned.
+                </p>
+              )}
             </>
           )}
         </div>
@@ -482,13 +817,21 @@ export default function ResourcesPage() {
         <div className="card mt-3 overflow-hidden">
           {inv ? (
             <ul className="divide-y divide-gray-100">
-              {inv.waste.filter((item) => item.severity !== "healthy").map((item, index) => (
+              {liveFlagged.map((item, index) => (
                 <li key={`${item.title}-${index}`} className="px-4 py-3">
                   <p className="text-sm font-medium">{item.title}</p>
                   <p className="text-xs text-gray-500">{item.detail}</p>
                 </li>
               ))}
-              {inv.waste.filter((item) => item.severity !== "healthy").length === 0 && (
+              {pendingDemo.map((item) => (
+                <li key={item.id}>
+                  <Link href={`/resources/${item.id}`} className="block px-4 py-3 hover:bg-gray-50">
+                    <span className="block text-sm font-medium">{item.name}</span>
+                    <span className="block text-xs text-gray-500">{item.insight}</span>
+                  </Link>
+                </li>
+              ))}
+              {liveFlagged.length + pendingDemo.length === 0 && (
                 <li className="muted p-8 text-center text-sm">Nothing is flagged.</li>
               )}
             </ul>

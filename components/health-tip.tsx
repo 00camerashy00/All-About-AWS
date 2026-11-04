@@ -1,8 +1,9 @@
+import { useState } from "react";
 import { StatusPill } from "./status-pill";
 import type { Health } from "@/lib/aws-resources";
 
 // Health pill with the waste/attention reason in a hover tooltip.
-// Table wrappers need `lg:overflow-visible` so the tooltip isn't clipped.
+// Fixed positioning so a scrolling table does not clip it.
 export function HealthTip({
   status,
   flags,
@@ -10,14 +11,28 @@ export function HealthTip({
   status: Health;
   flags: string[];
 }) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   if (flags.length === 0) return <StatusPill status={status} />;
   return (
-    <span className="group relative inline-block">
+    <span
+      className="inline-block"
+      onMouseEnter={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        setPos({
+          left: Math.max(8, Math.min(rect.left, window.innerWidth - 272)),
+          top: rect.bottom + 8,
+        });
+      }}
+      onMouseLeave={() => setPos(null)}
+    >
       <span className="cursor-help">
         <StatusPill status={status} />
       </span>
-      <span className="absolute left-0 top-full z-30 mt-2 hidden w-64 group-hover:block">
-        <span className="block rounded-xl border border-gray-200 bg-white p-3 text-left shadow-card">
+      {pos && (
+        <span
+          className="fixed z-50 w-64 rounded-xl border border-gray-200 bg-white p-3 text-left shadow-card"
+          style={{ left: pos.left, top: pos.top }}
+        >
           <span className="block text-xs font-semibold text-gray-900">
             Why this needs attention
           </span>
@@ -32,7 +47,7 @@ export function HealthTip({
             Click the name for details →
           </span>
         </span>
-      </span>
+      )}
     </span>
   );
 }

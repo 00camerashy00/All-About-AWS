@@ -374,9 +374,6 @@ export default function MonitoringPage() {
                 Rescan
               </button>
             )}
-            <span className={`rounded-full px-3 py-1.5 text-xs font-semibold ring-1 ${data?.live ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-gray-100 text-gray-500 ring-gray-200"}`}>
-              {data?.live ? "Live AWS data" : "Demo data"}
-            </span>
           </span>
         }
       />

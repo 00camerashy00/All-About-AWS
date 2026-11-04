@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
 export type StatTone = "yellow" | "amber" | "slate" | "red";
@@ -25,6 +26,7 @@ export function StatCard({
   icon: Icon,
   active = false,
   onClick,
+  action,
 }: {
   label: string;
   value: string;
@@ -34,15 +36,19 @@ export function StatCard({
   icon: LucideIcon;
   active?: boolean;
   onClick?: () => void;
+  action?: ReactNode;
 }) {
   const width = Math.min(100, Math.max(0, pct));
   const body = (
     <>
-      <div className="flex items-center gap-2">
-        <span className={`flex h-7 w-7 items-center justify-center rounded-full ${toneIcon[tone]}`}>
-          <Icon size={14} />
-        </span>
-        <p className="text-sm font-medium text-gray-600">{label}</p>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className={`flex h-7 w-7 items-center justify-center rounded-full ${toneIcon[tone]}`}>
+            <Icon size={14} />
+          </span>
+          <p className="text-sm font-medium text-gray-600">{label}</p>
+        </div>
+        {action}
       </div>
       <p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-100">

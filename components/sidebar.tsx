@@ -8,17 +8,13 @@ import {
   LayoutDashboard,
   Server,
   Users,
-  Activity,
-  Bell,
   Cloud,
 } from "lucide-react";
 
 const links = [
   { href: "/overview", label: "Overview", icon: LayoutDashboard },
-  { href: "/resources", label: "Resources", icon: Server },
   { href: "/users", label: "Users", icon: Users },
-  { href: "/monitoring", label: "Monitoring", icon: Activity },
-  { href: "/alarms", label: "Alarms", icon: Bell },
+  { href: "/resources", label: "Resources", icon: Server },
 ];
 
 export function Sidebar() {
@@ -31,8 +27,8 @@ export function Sidebar() {
           <Cloud size={18} />
         </span>
         <div>
-          <p className="text-sm font-semibold leading-none">AWS Dashboard</p>
-          <p className="mt-1 text-xs text-gray-500">Plain-English view</p>
+          <p className="text-sm font-semibold leading-none">All About AWS</p>
+          <p className="mt-1 text-xs text-gray-500">A Krishagni Project</p>
         </div>
       </div>
       <nav className="space-y-1 p-3">
@@ -60,7 +56,7 @@ export function Sidebar() {
         <div className="m-3 rounded-2xl bg-gray-50 p-4 ring-1 ring-gray-200/70">
           <p className="text-xs font-semibold">Demo data</p>
           <p className="mt-1 text-xs leading-relaxed text-gray-500">
-            Overview, Resources, Users, Monitoring, and Alarms use sample figures until .env.local
+            Overview, Users, and Resources use sample figures until .env.local
             has keys and you press Rescan on that page.
           </p>
         </div>

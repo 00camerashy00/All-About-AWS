@@ -3,12 +3,15 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, Database, HardDrive, RefreshCw, Search, Server, TriangleAlert } from "lucide-react";
+import { ArrowUpRight, Database, HardDrive, RefreshCw, Search, Server, TriangleAlert, Users } from "lucide-react";
 import { StatCard, type StatTone } from "@/components/stat-card";
 import { resources } from "@/lib/mock-data";
+import { demoUsers } from "@/lib/users-demo";
 import { InsightBanner } from "@/components/insight-banner";
 import { useAccount } from "@/components/account-provider";
 import type { Inventory } from "@/lib/aws-resources";
+import { scopeScanned } from "@/lib/inventory-merge";
+import type { UsersPayload } from "@/lib/users-types";
 
 type Stat = {
   label: string;
@@ -35,76 +38,146 @@ type Board = {
 };
 
 const statIcon = {
+  Users: Users,
   Servers: Server,
   Databases: Database,
   Buckets: HardDrive,
 } as const;
 
+type BusyKey = "all" | "users" | "servers" | "databases" | "buckets" | "health" | "queue" | "decisions";
+type ResourceScope = "ec2" | "rds" | "s3";
+
+const cardScope: Record<"servers" | "databases" | "buckets", ResourceScope> = {
+  servers: "ec2",
+  databases: "rds",
+  buckets: "s3",
+};
+
 export default function OverviewPage() {
   const { account, revision } = useAccount();
   const router = useRouter();
   const [inv, setInv] = useState<Inventory | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [directory, setDirectory] = useState<UsersPayload | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [refreshTick, setRefreshTick] = useState(0);
-  const refreshNow = useRef(false);
+  const [busy, setBusy] = useState<Partial<Record<BusyKey, boolean>>>({});
+  const alive = useRef(true);
+  const cacheToken = useRef(0);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  const applyInventory = (json: Inventory) => {
+    setInv((prev) => {
+      if (prev && (json.cacheRevision ?? 0) < (prev.cacheRevision ?? 0)) return prev;
+      return json;
+    });
+  };
+
+  const pullUsers = async (refresh: boolean, token?: number) => {
+    try {
+      const res = await fetch(refresh ? "/api/users?refresh=1" : "/api/users");
+      const json = await res.json();
+      if (!alive.current || (token !== undefined && token !== cacheToken.current)) return false;
+      if (res.ok && json.live) {
+        setDirectory(json as UsersPayload);
+        return true;
+      }
+      if (!refresh) setDirectory(null);
+      else setLiveError(json.detail || "Couldn't refresh users. Showing the previous list.");
+      return false;
+    } catch {
+      if (!alive.current || (token !== undefined && token !== cacheToken.current)) return false;
+      if (!refresh) setDirectory(null);
+      else setLiveError("Couldn't refresh users. Showing the previous list.");
+      return false;
+    }
+  };
+
+  const pullResources = async (refresh: boolean, scope?: ResourceScope, token?: number) => {
+    const params = new URLSearchParams();
+    if (refresh) params.set("refresh", "1");
+    if (scope) params.set("scope", scope);
+    const qs = params.toString();
+    try {
+      const res = await fetch(`/api/resources${qs ? `?${qs}` : ""}`);
+      const json = await res.json();
+      if (!alive.current || (token !== undefined && token !== cacheToken.current)) return false;
+      if (res.ok && json.live) {
+        applyInventory(json as Inventory);
+        return true;
+      }
+      if (!refresh && (json.error === "not_scanned" || json.error === "sync_disabled")) {
+        setInv(null);
+        return false;
+      }
+      if (!refresh) setInv(null);
+      setLiveError(
+        json.detail ||
+          (json.error === "credentials_expired_or_denied"
+            ? "AWS rejected the keys in the user menu. Showing demo data."
+            : "Couldn't read the live inventory. Showing demo data.")
+      );
+      return false;
+    } catch {
+      if (!alive.current || (token !== undefined && token !== cacheToken.current)) return false;
+      if (!refresh) setInv(null);
+      setLiveError("Couldn't read the live inventory. Showing demo data.");
+      return false;
+    }
+  };
 
   useEffect(() => {
     if (!account.configured) {
+      cacheToken.current += 1;
       setInv(null);
-      setLoading(false);
+      setDirectory(null);
       setLiveError(null);
       return;
     }
-    let cancelled = false;
-    const refresh = refreshNow.current;
-    refreshNow.current = false;
-    if (refresh) setLoading(true);
+    const token = ++cacheToken.current;
     setLiveError(null);
-    fetch(`/api/resources${refresh ? "?refresh=1" : ""}`)
-      .then((r) => r.json().then((json) => ({ ok: r.ok, json })))
-      .then(({ ok, json }) => {
-        if (cancelled) return;
-        if (ok && json.live) {
-          setInv(json as Inventory);
-          setLiveError(null);
-          return;
-        }
-        if (json.error === "not_scanned" || json.error === "sync_disabled") {
-          setInv(null);
-          setLiveError(null);
-          return;
-        }
-        setInv(null);
-        setLiveError(
-          json.detail ||
-            (json.error === "credentials_expired_or_denied"
-              ? "AWS rejected the keys in the user menu. Showing demo data."
-              : "Couldn't read the live inventory. Showing demo data.")
-        );
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setInv(null);
-          setLiveError("Couldn't read the live inventory. Showing demo data.");
-        }
+    void pullUsers(false, token).then((ok) => {
+      if (token === cacheToken.current && ok) setLiveError(null);
+    });
+    void pullResources(false, undefined, token).then((ok) => {
+      if (token === cacheToken.current && ok) setLiveError(null);
+    });
+    return () => {
+      if (cacheToken.current === token) cacheToken.current += 1;
+    };
+    // pullUsers and pullResources close over the latest setters; revision reloads the cache.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account.configured, revision]);
+
+  const run = (key: BusyKey, task: () => Promise<boolean | boolean[]>) => {
+    if (!account.configured || busy[key]) return;
+    setBusy((prev) => ({ ...prev, [key]: true }));
+    void task()
+      .then((result) => {
+        const ok = Array.isArray(result) ? result.every(Boolean) : result;
+        if (ok) setLiveError(null);
       })
       .finally(() => {
-        if (!cancelled && refresh) setLoading(false);
+        if (alive.current) setBusy((prev) => ({ ...prev, [key]: false }));
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [account.configured, revision, refreshTick]);
-
-  const onRefresh = () => {
-    if (!account.configured || loading) return;
-    refreshNow.current = true;
-    setRefreshTick((n) => n + 1);
   };
 
-  const board = useMemo(() => (inv ? liveBoard(inv) : demoBoard()), [inv]);
+  const onRescanAll = () => run("all", () => Promise.all([pullUsers(true), pullResources(true)]));
+  const onRescanUsers = () => run("users", () => pullUsers(true));
+  const onRescanScope = (key: "servers" | "databases" | "buckets") =>
+    run(key, () => pullResources(true, cardScope[key]));
+  const onRescanHealth = () =>
+    run("health", () => Promise.all([pullResources(true, "ec2"), pullResources(true, "rds"), pullResources(true, "s3")]));
+  const onRescanInventory = (key: "queue" | "decisions") => run(key, () => pullResources(true));
+
+  const board = useMemo(() => boardFor(inv), [inv]);
+  const people = directory ?? demoUsers();
+  const usersCard = userStat(people);
 
   const onSearch = (e: FormEvent) => {
     e.preventDefault();
@@ -113,15 +186,17 @@ export default function OverviewPage() {
       router.push("/resources");
       return;
     }
-    const hits = inv
-      ? [
-          ...inv.instances.map((item) => ({ id: item.id, label: `${item.name} ${item.id}` })),
-          ...inv.databases.map((item) => ({ id: item.id, label: item.id })),
-          ...inv.buckets.map((item) => ({ id: item.name, label: item.name })),
-        ].filter((item) => item.label.toLowerCase().includes(q))
-      : resources
-          .filter((item) => `${item.name} ${item.id}`.toLowerCase().includes(q))
-          .map((item) => ({ id: item.id, label: item.name }));
+    const hits = [
+      ...(inv && scopeScanned(inv, "ec2")
+        ? inv.instances.map((item) => ({ id: item.id, label: `${item.name} ${item.id}` }))
+        : resources.filter((item) => item.kind === "ec2").map((item) => ({ id: item.id, label: `${item.name} ${item.id}` }))),
+      ...(inv && scopeScanned(inv, "rds")
+        ? inv.databases.map((item) => ({ id: item.id, label: item.id }))
+        : resources.filter((item) => item.kind === "rds").map((item) => ({ id: item.id, label: `${item.name} ${item.id}` }))),
+      ...(inv && scopeScanned(inv, "s3")
+        ? inv.buckets.map((item) => ({ id: item.name, label: item.name }))
+        : resources.filter((item) => item.kind === "s3").map((item) => ({ id: item.id, label: `${item.name} ${item.id}` }))),
+    ].filter((item) => item.label.toLowerCase().includes(q));
     if (hits.length === 1) {
       router.push(`/resources/${hits[0].id}`);
       return;
@@ -150,15 +225,7 @@ export default function OverviewPage() {
             />
           </div>
           {account.configured ? (
-            <button
-              type="button"
-              onClick={onRefresh}
-              disabled={loading}
-              className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-xs font-semibold text-gray-700 ring-1 ring-gray-200 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 disabled:cursor-wait disabled:opacity-60"
-            >
-              <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
-              Rescan
-            </button>
+            <RescanButton label="Rescan All" busy={Boolean(busy.all)} onClick={onRescanAll} />
           ) : (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-xs font-semibold text-gray-600 ring-1 ring-gray-200">
               Demo data
@@ -173,16 +240,28 @@ export default function OverviewPage() {
         </div>
       )}
 
-      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {board.stats.map((stat) => (
+      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {(
+          [
+            { stat: usersCard, key: "users" as const, onClick: onRescanUsers },
+            { stat: board.stats[0], key: "servers" as const, onClick: () => onRescanScope("servers") },
+            { stat: board.stats[1], key: "databases" as const, onClick: () => onRescanScope("databases") },
+            { stat: board.stats[2], key: "buckets" as const, onClick: () => onRescanScope("buckets") },
+          ] as const
+        ).map((card) => (
           <StatCard
-            key={stat.label}
-            label={stat.label}
-            value={stat.value}
-            caption={stat.caption}
-            pct={stat.pct}
-            tone={stat.tone}
-            icon={statIcon[stat.label as keyof typeof statIcon] ?? TriangleAlert}
+            key={card.stat.label}
+            label={card.stat.label}
+            value={card.stat.value}
+            caption={card.stat.caption}
+            pct={card.stat.pct}
+            tone={card.stat.tone}
+            icon={statIcon[card.stat.label as keyof typeof statIcon] ?? TriangleAlert}
+            action={
+              account.configured ? (
+                <RescanButton label={`Rescan ${card.stat.label}`} busy={Boolean(busy[card.key])} onClick={card.onClick} />
+              ) : undefined
+            }
           />
         ))}
       </div>
@@ -190,8 +269,15 @@ export default function OverviewPage() {
       <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-12">
         <div className="grid gap-3 xl:col-span-4">
           <section className="card p-4">
-            <p className="text-sm font-semibold">Healthy share</p>
-            <p className="text-xs text-gray-500">Resources that need no decision</p>
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold">Healthy share</p>
+                <p className="text-xs text-gray-500">Resources that need no decision</p>
+              </div>
+              {account.configured ? (
+                <RescanButton label="Rescan healthy share" busy={Boolean(busy.health)} onClick={onRescanHealth} />
+              ) : null}
+            </div>
             <div className="mt-3 flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs text-gray-500">In good shape</p>
@@ -201,9 +287,14 @@ export default function OverviewPage() {
             </div>
           </section>
           <section className="card p-4">
-            <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center justify-between gap-2 text-sm">
               <p className="font-semibold">Decision queue</p>
-              <p className="font-semibold">{board.plan.pct}%</p>
+              <div className="flex items-center gap-2">
+                {account.configured ? (
+                  <RescanButton label="Rescan decision queue" busy={Boolean(busy.queue)} onClick={() => onRescanInventory("queue")} />
+                ) : null}
+                <p className="font-semibold">{board.plan.pct}%</p>
+              </div>
             </div>
             <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-100">
               <div className="h-full rounded-full bg-zinc-900" style={{ width: `${board.plan.pct}%` }} />
@@ -217,11 +308,16 @@ export default function OverviewPage() {
         </div>
 
         <section className="card p-4 xl:col-span-8">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold">Needs a decision</h2>
-            <Link href="/resources" className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900">
-              All resources <ArrowUpRight size={14} />
-            </Link>
+            <div className="flex items-center gap-2">
+              {account.configured ? (
+                <RescanButton label="Rescan needs a decision" busy={Boolean(busy.decisions)} onClick={() => onRescanInventory("decisions")} />
+              ) : null}
+              <Link href="/resources" className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900">
+                All resources <ArrowUpRight size={14} />
+              </Link>
+            </div>
           </div>
           {board.rows.length === 0 ? (
             <p className="py-8 text-sm text-gray-500">Nothing is flagged. Servers, databases, and storage look tidy.</p>
@@ -260,6 +356,83 @@ export default function OverviewPage() {
   );
 }
 
+function RescanButton({ label, busy, onClick }: { label: string; busy: boolean; onClick: () => void }) {
+  const text = label === "Rescan All" ? "Rescan All" : "Rescan";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      aria-label={label}
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-white px-3 py-2 text-xs font-semibold text-gray-700 ring-1 ring-gray-200 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 disabled:cursor-wait disabled:opacity-60"
+    >
+      <RefreshCw size={13} className={busy ? "animate-spin" : ""} />
+      {text}
+    </button>
+  );
+}
+
+function titledScope(title: string, source?: string): ResourceScope | "other" {
+  if (source === "ec2" || source === "rds" || source === "s3" || source === "other") return source;
+  if (title.startsWith("Bucket ")) return "s3";
+  if (title.startsWith("Database ")) return "rds";
+  if (title.endsWith(" is stopped")) return "ec2";
+  return "other";
+}
+
+function boardFor(inv: Inventory | null): Board {
+  if (!inv) return demoBoard();
+  const ec2 = scopeScanned(inv, "ec2");
+  const rds = scopeScanned(inv, "rds");
+  const s3 = scopeScanned(inv, "s3");
+  if (ec2 && rds && s3) return liveBoard(inv);
+  const demo = demoBoard();
+  const live = liveBoard({
+    ...inv,
+    instances: ec2 ? inv.instances : [],
+    databases: rds ? inv.databases : [],
+    buckets: s3 ? inv.buckets : [],
+    waste: inv.waste.filter((item) => {
+      const scope = titledScope(item.title, item.source);
+      if (scope === "other") return false;
+      return scope === "ec2" ? ec2 : scope === "rds" ? rds : s3;
+    }),
+  });
+  const demoRows = demo.rows.filter((row) => {
+    const sample = resources.find((item) => item.id === row.key);
+    if (!sample) return false;
+    if (sample.kind === "ec2") return !ec2;
+    if (sample.kind === "rds") return !rds;
+    return !s3;
+  });
+  const healthy =
+    (ec2 ? inv.instances.filter((item) => item.status === "healthy").length : resources.filter((item) => item.kind === "ec2" && item.status === "healthy").length) +
+    (rds ? inv.databases.filter((item) => item.statusLevel === "healthy").length : resources.filter((item) => item.kind === "rds" && item.status === "healthy").length) +
+    (s3 ? inv.buckets.filter((item) => item.statusLevel === "healthy").length : resources.filter((item) => item.kind === "s3" && item.status === "healthy").length);
+  const total =
+    (ec2 ? inv.instances.length : resources.filter((item) => item.kind === "ec2").length) +
+    (rds ? inv.databases.length : resources.filter((item) => item.kind === "rds").length) +
+    (s3 ? inv.buckets.length : resources.filter((item) => item.kind === "s3").length);
+  const rows = [...live.rows, ...demoRows].slice(0, 6);
+  const flagged = Math.max(0, total - healthy);
+  return {
+    stats: [ec2 ? live.stats[0] : demo.stats[0], rds ? live.stats[1] : demo.stats[1], s3 ? live.stats[2] : demo.stats[2]],
+    gauge: {
+      pct: total ? Math.round((healthy / total) * 100) : 0,
+      value: `${healthy}`,
+      goal: `of ${total}`,
+      caption: `${healthy} of ${total}`,
+    },
+    plan: {
+      pct: total ? Math.round((Math.min(flagged, total) / total) * 100) : 0,
+      left: "0 flagged",
+      right: `${total} resources`,
+      caption: rows[0]?.title ?? (flagged ? `${flagged} still need a decision.` : "Nothing is flagged right now."),
+    },
+    rows,
+  };
+}
+
 function Gauge({ pct, value, goal }: { pct: number; value: string; goal: string }) {
   const r = 36;
   const c = 2 * Math.PI * r;
@@ -287,6 +460,21 @@ function Gauge({ pct, value, goal }: { pct: number; value: string; goal: string 
       </div>
     </div>
   );
+}
+
+function userStat(data: UsersPayload): Stat {
+  const ssm = data.ssm.length;
+  const sso = data.sso.length;
+  const total = ssm + sso;
+  const inactive =
+    data.ssm.filter((row) => row.inactive).length + data.sso.filter((row) => row.inactive).length;
+  return {
+    label: "Users",
+    value: `${total}`,
+    caption: `${ssm} SSM · ${sso} SSO`,
+    pct: total ? ((total - inactive) / total) * 100 : 0,
+    tone: "slate",
+  };
 }
 
 function demoBoard(): Board {
