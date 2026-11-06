@@ -6,6 +6,7 @@ import {
   evaluateSsmAccess,
   highestLevel,
   isInactive,
+  pickActivity,
   levelForManagedPolicy,
   linkPopulations,
   matchesLoginFilter,
@@ -203,6 +204,33 @@ test("highest assignment wins and services collapse", () => {
   assert.equal(previewServices(["EC2", "IAM", "RDS", "S3", "SSM"]), "EC2, IAM, RDS +2 more");
   assert.equal(previewServices("all"), "All services");
   assert.equal(servicesFromActions(["*"]), "all");
+});
+
+test("a Session Manager session counts as newer activity than an old console sign-in", () => {
+  const now = Date.parse("2026-11-06T00:00:00Z");
+  const picked = pickActivity(
+    [
+      { at: new Date(now - 100 * 86_400_000).toISOString(), kind: "signin" },
+      { at: new Date(now - 2 * 86_400_000).toISOString(), kind: "session" },
+    ],
+    true
+  );
+  assert.equal(picked.kind, "session");
+  assert.equal(isInactive({ ...activity(picked.at), status: picked.status }, now), false);
+});
+
+test("no console sign-in and no session is inactive when history was readable", () => {
+  const now = Date.parse("2026-11-06T00:00:00Z");
+  const picked = pickActivity([], true);
+  assert.equal(picked.at, null);
+  assert.equal(picked.status, "known");
+  assert.equal(isInactive({ ...activity(null), status: picked.status }, now), true);
+});
+
+test("unreadable history is not recorded as inactive", () => {
+  const picked = pickActivity([], false);
+  assert.equal(picked.status, "unavailable");
+  assert.equal(isInactive({ ...activity(null, "unavailable"), status: picked.status }, Date.now()), false);
 });
 
 test("inactive flags never and 90 days, not unavailable", () => {

@@ -4,18 +4,27 @@ import {
   EC2Client,
 } from "@aws-sdk/client-ec2";
 import {
+  GenerateServiceLastAccessedDetailsCommand,
+  GetAccessKeyLastUsedCommand,
   GetGroupPolicyCommand,
+  GetLoginProfileCommand,
   GetPolicyCommand,
   GetPolicyVersionCommand,
+  GetServiceLastAccessedDetailsCommand,
   GetUserCommand,
   GetUserPolicyCommand,
   IAMClient,
+  ListAccessKeysCommand,
   ListAttachedGroupPoliciesCommand,
   ListAttachedUserPoliciesCommand,
   ListGroupPoliciesCommand,
   ListGroupsForUserCommand,
+  ListMFADevicesCommand,
+  ListPoliciesCommand,
+  ListRolesCommand,
   ListUserPoliciesCommand,
   ListUsersCommand,
+  ListUserTagsCommand,
 } from "@aws-sdk/client-iam";
 import {
   DescribeSessionsCommand,
@@ -59,11 +68,27 @@ import {
   isInactive,
   levelForManagedPolicy,
   linkPopulations,
+  pickActivity,
   previewServices,
   type NamedPolicy,
   type PolicyDocument,
 } from "@/lib/users-logic";
-import type { Activity, SsmUserRow, SsoAssignment, SsoUserRow, UsersPayload } from "@/lib/users-types";
+import type {
+  Activity,
+  IamAccessKey,
+  IamGroupMembership,
+  IamPolicyAttachment,
+  IamPolicyRow,
+  IamRoleRow,
+  IamServiceAccess,
+  IamTag,
+  IamUserRow,
+  InstanceGrant,
+  SsmUserRow,
+  SsoAssignment,
+  SsoUserRow,
+  UsersPayload,
+} from "@/lib/users-types";
 import { SCP_NOTE } from "@/lib/users-types";
 
 const PORT_FORWARD = "AWS-StartPortForwardingSessionToRemoteHost";
@@ -144,15 +169,33 @@ export async function buildUsers(): Promise<UsersPayload> {
     listTrailHits(warnings),
   ]);
   const historyOk = sessionResult.ok || trailResult.ok;
-  const ssoResult = await listSso(iam, accountId, trailResult.hits, trailResult.ok, warnings).catch((error: unknown) => {
+  const ssoResult = await listSso(
+    iam,
+    accountId,
+    instances,
+    sessionResult.hits,
+    trailResult.sessions,
+    trailResult.signins,
+    trailResult.ok,
+    sessionResult.ok,
+    warnings
+  ).catch((error: unknown) => {
     warnings.push(`SSO scan failed: ${(error as { name?: string }).name ?? "error"}. No SSO users were invented to fill the gap.`);
-    return { users: [] as SsoUserRow[] };
+    return { users: [] as SsoUserRow[], sessionUsers: [] as SsmUserRow[] };
   });
 
-  const ssm = await listSsmUsers(iam, instances, sessionResult.hits, trailResult.hits, historyOk, warnings);
-  linkPopulations(ssm, ssoResult.users);
-  ssm.sort((a, b) => a.userName.localeCompare(b.userName));
+  const [iamSsm, iamUsers, roles, policies] = await Promise.all([
+    listSsmUsers(iam, instances, sessionResult.hits, trailResult.sessions, historyOk, warnings),
+    listIamUsers(iam, warnings),
+    listIamRoles(iam, warnings),
+    listIamPolicies(iam, warnings),
+  ]);
+  linkPopulations(iamSsm, ssoResult.users);
+  const ssm = [...iamSsm, ...ssoResult.sessionUsers].sort((a, b) => a.userName.localeCompare(b.userName));
   ssoResult.users.sort((a, b) => a.userName.localeCompare(b.userName));
+  iamUsers.sort((a, b) => a.userName.localeCompare(b.userName));
+  roles.sort((a, b) => a.roleName.localeCompare(b.roleName));
+  policies.sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     live: true,
@@ -161,6 +204,9 @@ export async function buildUsers(): Promise<UsersPayload> {
     scpNote: SCP_NOTE,
     ssm,
     sso: ssoResult.users,
+    iam: iamUsers,
+    roles,
+    policies,
     instances: instances.map(({ id, name, region }) => ({ id, name, region })),
   };
 }
@@ -263,8 +309,9 @@ function ownerKeys(owner: string): string[] {
   return Array.from(keys);
 }
 
-async function listTrailHits(warnings: string[]): Promise<{ hits: Map<string, SessionHit>; ok: boolean }> {
-  const hits = new Map<string, SessionHit>();
+async function listTrailHits(warnings: string[]): Promise<{ sessions: Map<string, SessionHit>; signins: Map<string, SessionHit>; ok: boolean }> {
+  const sessions = new Map<string, SessionHit>();
+  const signins = new Map<string, SessionHit>();
   const home = requireAccount().region;
   const regionsToTry = Array.from(new Set([home, "us-east-1"]));
   let any = false;
@@ -284,7 +331,7 @@ async function listTrailHits(warnings: string[]): Promise<{ hits: Map<string, Se
             )
           );
           any = true;
-          for (const event of result.Events ?? []) rememberTrail(hits, event);
+          for (const event of result.Events ?? []) rememberTrail(sessions, signins, event);
           token = result.NextToken;
           if (!token) break;
         }
@@ -298,12 +345,12 @@ async function listTrailHits(warnings: string[]): Promise<{ hits: Map<string, Se
   }
   if (!any) {
     warnings.push("CloudTrail lookup was not permitted. Last login shows SSM session history only, or Unavailable when that is missing too.");
-    return { hits, ok: false };
+    return { sessions, signins, ok: false };
   }
-  return { hits, ok: true };
+  return { sessions, signins, ok: true };
 }
 
-function rememberTrail(hits: Map<string, SessionHit>, event: Event) {
+function rememberTrail(sessions: Map<string, SessionHit>, signins: Map<string, SessionHit>, event: Event) {
   if (!event.Username || !event.EventTime) return;
   let target = "";
   let documentName: string | null = null;
@@ -320,7 +367,8 @@ function rememberTrail(hits: Map<string, SessionHit>, event: Event) {
       /* keep the timestamp */
     }
   }
-  if (event.EventName !== "StartSession") {
+  const kind = event.EventName === "StartSession" ? "session" : "signin";
+  if (kind !== "session") {
     target = "";
     documentName = null;
     forwardedHost = null;
@@ -331,12 +379,385 @@ function rememberTrail(hits: Map<string, SessionHit>, event: Event) {
     documentName,
     forwardedHost,
     source: "cloudtrail",
-    kind: event.EventName === "StartSession" ? "session" : "signin",
+    kind,
   };
-  for (const key of ownerKeys(event.Username)) {
-    const prev = hits.get(key);
-    if (!prev || prev.at < hit.at) hits.set(key, hit);
+  const bucket = kind === "session" ? sessions : signins;
+  for (const key of ownerKeys(event.Username)) keepLatest(bucket, key, hit);
+}
+
+function keepLatest(hits: Map<string, SessionHit>, key: string, hit: SessionHit) {
+  const prev = hits.get(key);
+  if (!prev || prev.at < hit.at) hits.set(key, hit);
+}
+
+async function listIamUsers(iam: IAMClient, warnings: string[]): Promise<IamUserRow[]> {
+  const users: { userName: string; arn: string }[] = [];
+  let marker: string | undefined;
+  do {
+    const page = await withBackoff(() => iam.send(new ListUsersCommand({ Marker: marker, MaxItems: 100 })));
+    for (const user of page.Users ?? []) {
+      if (user.UserName && user.Arn) users.push({ userName: user.UserName, arn: user.Arn });
+    }
+    marker = page.IsTruncated ? page.Marker : undefined;
+  } while (marker);
+
+  let keyHistoryDenied = false;
+  let accessAdvisorDenied = false;
+  const groupPolicies = new Map<string, IamPolicyAttachment[]>();
+  const rows = await mapPool(users, 4, async (user) => {
+    try {
+      return await oneIamUser(iam, user, groupPolicies, () => {
+        keyHistoryDenied = true;
+      }, () => {
+        accessAdvisorDenied = true;
+      });
+    } catch (error) {
+      warnings.push(`IAM user ${user.userName} could not be read (${(error as { name?: string }).name ?? "error"}).`);
+      return null;
+    }
+  });
+  if (keyHistoryDenied) {
+    warnings.push("Access key last-used could not be read. IAM rows still list every user. Console password time is shown when IAM returned it.");
   }
+  if (accessAdvisorDenied) {
+    warnings.push("Service last accessed could not be read. The Last accessed tab stays empty for those users.");
+  }
+  return rows.filter((row): row is IamUserRow => row !== null);
+}
+
+function policyKind(arn: string | null | undefined): IamPolicyAttachment["type"] {
+  if (!arn) return "Inline";
+  if (arn.startsWith("arn:aws:iam::aws:policy/")) return "AWS managed";
+  return "Customer managed";
+}
+
+function arnTail(arn: string | null | undefined): string | null {
+  if (!arn) return null;
+  const slash = arn.lastIndexOf("/");
+  return slash >= 0 ? arn.slice(slash + 1) : arn;
+}
+
+async function groupPolicyAttachments(iam: IAMClient, groupName: string, cache: Map<string, IamPolicyAttachment[]>): Promise<IamPolicyAttachment[]> {
+  const cached = cache.get(groupName);
+  if (cached) return cached;
+  const [attached, inline] = await Promise.all([
+    withBackoff(() => iam.send(new ListAttachedGroupPoliciesCommand({ GroupName: groupName }))),
+    withBackoff(() => iam.send(new ListGroupPoliciesCommand({ GroupName: groupName }))),
+  ]);
+  const policies: IamPolicyAttachment[] = [];
+  for (const policy of attached.AttachedPolicies ?? []) {
+    if (!policy.PolicyName) continue;
+    policies.push({
+      name: policy.PolicyName,
+      arn: policy.PolicyArn ?? null,
+      type: policyKind(policy.PolicyArn),
+      attachedVia: groupName,
+    });
+  }
+  for (const name of inline.PolicyNames ?? []) {
+    policies.push({ name, arn: null, type: "Inline", attachedVia: groupName });
+  }
+  cache.set(groupName, policies);
+  return policies;
+}
+
+async function listUserTags(iam: IAMClient, userName: string): Promise<IamTag[]> {
+  const tags: IamTag[] = [];
+  let marker: string | undefined;
+  do {
+    const page = await withBackoff(() => iam.send(new ListUserTagsCommand({ UserName: userName, Marker: marker })));
+    for (const tag of page.Tags ?? []) {
+      if (tag.Key) tags.push({ key: tag.Key, value: tag.Value ?? "" });
+    }
+    marker = page.IsTruncated ? page.Marker : undefined;
+  } while (marker);
+  return tags;
+}
+
+async function consolePasswordEnabled(iam: IAMClient, userName: string): Promise<boolean | null> {
+  try {
+    await withBackoff(() => iam.send(new GetLoginProfileCommand({ UserName: userName })));
+    return true;
+  } catch (error) {
+    const name = (error as { name?: string }).name ?? "";
+    if (name === "NoSuchEntity" || name === "NoSuchEntityException") return false;
+    return null;
+  }
+}
+
+async function userAccessKeys(iam: IAMClient, userName: string, onKeyDenied: () => void): Promise<{ keys: IamAccessKey[]; newest: string | null; unreadable: boolean }> {
+  const keys: IamAccessKey[] = [];
+  let newest: string | null = null;
+  let unreadable = false;
+  try {
+    const listed = await withBackoff(() => iam.send(new ListAccessKeysCommand({ UserName: userName })));
+    for (const key of listed.AccessKeyMetadata ?? []) {
+      if (!key.AccessKeyId) continue;
+      let lastUsedAt: string | null = null;
+      let lastUsedRegion: string | null = null;
+      let lastUsedService: string | null = null;
+      try {
+        const used = await withBackoff(() => iam.send(new GetAccessKeyLastUsedCommand({ AccessKeyId: key.AccessKeyId })));
+        lastUsedAt = used.AccessKeyLastUsed?.LastUsedDate?.toISOString() ?? null;
+        lastUsedRegion = used.AccessKeyLastUsed?.Region ?? null;
+        lastUsedService = used.AccessKeyLastUsed?.ServiceName ?? null;
+      } catch {
+        unreadable = true;
+        onKeyDenied();
+      }
+      if (lastUsedAt && (!newest || newest < lastUsedAt)) newest = lastUsedAt;
+      keys.push({
+        id: key.AccessKeyId,
+        status: key.Status === "Inactive" ? "Inactive" : "Active",
+        createdAt: key.CreateDate?.toISOString() ?? null,
+        lastUsedAt,
+        lastUsedRegion,
+        lastUsedService,
+      });
+    }
+  } catch {
+    unreadable = true;
+    onKeyDenied();
+  }
+  return { keys, newest, unreadable };
+}
+
+async function serviceLastAccessed(iam: IAMClient, arn: string, onDenied: () => void): Promise<{ services: IamServiceAccess[]; status: "known" | "unavailable" }> {
+  let jobId: string | undefined;
+  try {
+    const job = await withBackoff(() => iam.send(new GenerateServiceLastAccessedDetailsCommand({ Arn: arn, Granularity: "SERVICE_LEVEL" })));
+    jobId = job.JobId;
+  } catch (error) {
+    const name = (error as { name?: string }).name ?? "";
+    if (name === "AccessDenied" || name === "AccessDeniedException") onDenied();
+    return { services: [], status: "unavailable" };
+  }
+  if (!jobId) return { services: [], status: "unavailable" };
+  const deadline = Date.now() + 20_000;
+  const services: IamServiceAccess[] = [];
+  let marker: string | undefined;
+  while (Date.now() < deadline) {
+    const page = await withBackoff(() =>
+      iam.send(new GetServiceLastAccessedDetailsCommand({ JobId: jobId, Marker: marker, MaxItems: 100 }))
+    );
+    if (page.JobStatus === "FAILED") return { services: [], status: "unavailable" };
+    if (page.JobStatus === "IN_PROGRESS") {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
+    for (const item of page.ServicesLastAccessed ?? []) {
+      services.push({
+        service: item.ServiceName ?? item.ServiceNamespace ?? "Unknown service",
+        lastAccessed: item.LastAuthenticated?.toISOString() ?? null,
+        region: item.LastAuthenticatedRegion ?? null,
+      });
+    }
+    if (!page.IsTruncated) return { services, status: "known" };
+    marker = page.Marker;
+  }
+  return { services, status: services.length ? "known" : "unavailable" };
+}
+
+async function oneIamUser(
+  iam: IAMClient,
+  user: { userName: string; arn: string },
+  groupPolicies: Map<string, IamPolicyAttachment[]>,
+  onKeyDenied: () => void,
+  onAccessDenied: () => void
+): Promise<IamUserRow> {
+  const [detail, groupPage, attached, inline, tags, mfa, passwordEnabled, access, lastAccessed] = await Promise.all([
+    withBackoff(() => iam.send(new GetUserCommand({ UserName: user.userName }))),
+    withBackoff(() => iam.send(new ListGroupsForUserCommand({ UserName: user.userName, MaxItems: 100 }))),
+    withBackoff(() => iam.send(new ListAttachedUserPoliciesCommand({ UserName: user.userName }))),
+    withBackoff(() => iam.send(new ListUserPoliciesCommand({ UserName: user.userName }))),
+    listUserTags(iam, user.userName),
+    withBackoff(() => iam.send(new ListMFADevicesCommand({ UserName: user.userName }))),
+    consolePasswordEnabled(iam, user.userName),
+    userAccessKeys(iam, user.userName, onKeyDenied),
+    serviceLastAccessed(iam, user.arn, onAccessDenied),
+  ]);
+  const passwordAt = detail.User?.PasswordLastUsed?.toISOString() ?? null;
+  const groups: IamGroupMembership[] = [];
+  const policies: IamPolicyAttachment[] = [];
+  for (const policy of attached.AttachedPolicies ?? []) {
+    if (!policy.PolicyName) continue;
+    policies.push({
+      name: policy.PolicyName,
+      arn: policy.PolicyArn ?? null,
+      type: policyKind(policy.PolicyArn),
+      attachedVia: "Directly",
+    });
+  }
+  for (const name of inline.PolicyNames ?? []) {
+    policies.push({ name, arn: null, type: "Inline", attachedVia: "Directly" });
+  }
+  for (const group of groupPage.Groups ?? []) {
+    if (!group.GroupName) continue;
+    const inherited = await groupPolicyAttachments(iam, group.GroupName, groupPolicies);
+    groups.push({
+      name: group.GroupName,
+      arn: group.Arn ?? "",
+      createdAt: group.CreateDate?.toISOString() ?? null,
+      policies: inherited.map((policy) => policy.name),
+    });
+    for (const policy of inherited) policies.push(policy);
+  }
+  const keyAt = access.newest;
+  const passwordWins = Boolean(passwordAt && (!keyAt || passwordAt >= keyAt));
+  const at = passwordWins ? passwordAt : keyAt;
+  const activity: Activity = {
+    at,
+    status: access.unreadable && !at ? "unavailable" : "known",
+    targetInstanceId: null,
+    targetName: null,
+    forwardedHost: null,
+    source: access.unreadable && !at ? "unavailable" : "none",
+    kind: passwordWins ? "signin" : null,
+    note: passwordWins
+      ? "Console password was used. This is the IAM user record, not a Session Manager session."
+      : keyAt
+        ? "An access key was used. This is the IAM user record, not a Session Manager session."
+        : access.unreadable
+          ? "Access key last-used could not be read, and no console password use was recorded."
+          : "No console password or access key use was recorded.",
+  };
+  return {
+    population: "iam",
+    id: user.userName,
+    userName: user.userName,
+    arn: user.arn,
+    activity,
+    groups,
+    policies,
+    permissionsBoundary: arnTail(detail.User?.PermissionsBoundary?.PermissionsBoundaryArn),
+    tags,
+    passwordEnabled,
+    passwordLastUsed: passwordAt,
+    mfaDevices: (mfa.MFADevices ?? []).map((device) => device.SerialNumber ?? "").filter(Boolean),
+    accessKeys: access.keys,
+    lastAccessed: lastAccessed.services,
+    lastAccessedStatus: lastAccessed.status,
+    inactive: isInactive(activity),
+  };
+}
+
+function trustedEntities(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const text = raw.trim().startsWith("{") ? raw : safeDecode(raw);
+  let policy: { Statement?: unknown };
+  try {
+    policy = JSON.parse(text) as { Statement?: unknown };
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  const statements = Array.isArray(policy.Statement) ? policy.Statement : [];
+  for (const statement of statements) {
+    if (!statement || typeof statement !== "object") continue;
+    collectPrincipals((statement as { Principal?: unknown }).Principal, names);
+  }
+  return names;
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function collectPrincipals(principal: unknown, names: string[]) {
+  if (principal == null) return;
+  if (principal === "*") {
+    if (!names.includes("Anyone")) names.push("Anyone");
+    return;
+  }
+  if (typeof principal === "string") {
+    if (!names.includes(principal)) names.push(principal);
+    return;
+  }
+  if (typeof principal !== "object") return;
+  const record = principal as Record<string, unknown>;
+  for (const key of ["Service", "AWS", "Federated", "CanonicalUser"]) {
+    const value = record[key];
+    const list = Array.isArray(value) ? value : value != null ? [value] : [];
+    for (const item of list) {
+      const label = String(item);
+      if (!names.includes(label)) names.push(label);
+    }
+  }
+}
+
+async function listIamRoles(iam: IAMClient, warnings: string[]): Promise<IamRoleRow[]> {
+  try {
+    const roles: IamRoleRow[] = [];
+    let marker: string | undefined;
+    do {
+      const page = await withBackoff(() => iam.send(new ListRolesCommand({ Marker: marker, MaxItems: 100 })));
+      for (const role of page.Roles ?? []) {
+        if (!role.RoleName || !role.Arn) continue;
+        roles.push({
+          population: "role",
+          id: role.Arn,
+          roleName: role.RoleName,
+          arn: role.Arn,
+          trustedEntities: trustedEntities(role.AssumeRolePolicyDocument),
+          lastUsedAt: role.RoleLastUsed?.LastUsedDate?.toISOString() ?? null,
+          createdAt: role.CreateDate?.toISOString() ?? null,
+        });
+      }
+      marker = page.IsTruncated ? page.Marker : undefined;
+    } while (marker);
+    return roles;
+  } catch (error) {
+    warnings.push(`IAM roles could not be read (${(error as { name?: string }).name ?? "error"}).`);
+    return [];
+  }
+}
+
+async function listIamPolicies(iam: IAMClient, warnings: string[]): Promise<IamPolicyRow[]> {
+  try {
+    const [customer, attachedAws] = await Promise.all([
+      listPolicies(iam, "Local", false),
+      listPolicies(iam, "AWS", true),
+    ]);
+    const seen = new Set<string>();
+    const rows: IamPolicyRow[] = [];
+    for (const row of [...customer, ...attachedAws]) {
+      if (seen.has(row.arn)) continue;
+      seen.add(row.arn);
+      rows.push(row);
+    }
+    return rows;
+  } catch (error) {
+    warnings.push(`IAM policies could not be read (${(error as { name?: string }).name ?? "error"}).`);
+    return [];
+  }
+}
+
+async function listPolicies(iam: IAMClient, scope: "Local" | "AWS", onlyAttached: boolean): Promise<IamPolicyRow[]> {
+  const rows: IamPolicyRow[] = [];
+  let marker: string | undefined;
+  do {
+    const page = await withBackoff(() =>
+      iam.send(new ListPoliciesCommand({ Scope: scope, OnlyAttached: onlyAttached, Marker: marker, MaxItems: 100 }))
+    );
+    for (const policy of page.Policies ?? []) {
+      if (!policy.PolicyName || !policy.Arn) continue;
+      rows.push({
+        population: "policy",
+        id: policy.Arn,
+        name: policy.PolicyName,
+        arn: policy.Arn,
+        type: policy.Arn.startsWith("arn:aws:iam::aws:policy/") ? "AWS managed" : "Customer managed",
+        attachmentCount: policy.AttachmentCount ?? 0,
+        description: policy.Description ?? null,
+      });
+    }
+    marker = page.IsTruncated ? page.Marker : undefined;
+  } while (marker);
+  return rows;
 }
 
 async function listSsmUsers(
@@ -497,13 +918,13 @@ async function managedDocument(
 }
 
 function activityFor(
-  user: { userName: string; arn: string },
+  user: { userName: string; arn: string; aliases?: string[] },
   sessions: Map<string, SessionHit>,
   trail: Map<string, SessionHit>,
   instances: LiveInstance[],
   historyOk: boolean
 ): Activity {
-  const keys = [user.userName.toLowerCase(), user.arn.toLowerCase()];
+  const keys = Array.from(new Set([user.userName.toLowerCase(), user.arn.toLowerCase(), ...(user.aliases ?? [])]));
   const candidates = keys
     .flatMap((key) => [sessions.get(key), trail.get(key)].filter(Boolean) as SessionHit[])
     .filter((item) => item.kind === "session");
@@ -529,6 +950,7 @@ function activityFor(
     targetName: named?.name ?? (latest.instanceId || null),
     forwardedHost: latest.forwardedHost,
     source: sources.size > 1 ? "both" : latest.source,
+    kind: "session",
     note: latest.forwardedHost
       ? `Port forwarding to ${latest.forwardedHost}. DescribeSessions does not return the remote host; this came from CloudTrail.`
       : null,
@@ -538,10 +960,14 @@ function activityFor(
 async function listSso(
   iam: IAMClient,
   callerAccount: string,
-  trail: Map<string, SessionHit>,
+  instances: LiveInstance[],
+  ssmSessions: Map<string, SessionHit>,
+  trailSessions: Map<string, SessionHit>,
+  signins: Map<string, SessionHit>,
   trailOk: boolean,
+  sessionsOk: boolean,
   warnings: string[]
-): Promise<{ users: SsoUserRow[] }> {
+): Promise<{ users: SsoUserRow[]; sessionUsers: SsmUserRow[] }> {
   const home = requireAccount().region;
   const tryRegions = Array.from(new Set([home, "us-east-1", "ap-south-1", "eu-west-1", "us-west-2"]));
   let instanceArn = "";
@@ -564,7 +990,7 @@ async function listSso(
   }
   if (!instanceArn) {
     warnings.push("No IAM Identity Center instance was found in the checked regions. The SSO list is empty because Identity Center is not enabled here, not because users were skipped.");
-    return { users: [] };
+    return { users: [], sessionUsers: [] };
   }
 
   const admin = new SSOAdminClient(accountClientConfig(ssoRegion));
@@ -584,6 +1010,7 @@ async function listSso(
     policies: string[];
     unresolved: boolean;
     evidence: string;
+    documents: NamedPolicy[];
   }>();
 
   for (const arn of permissionSets) {
@@ -594,9 +1021,14 @@ async function listSso(
     const inlineRaw = await withBackoff(() =>
       admin.send(new GetInlinePolicyForPermissionSetCommand({ InstanceArn: instanceArn, PermissionSetArn: arn }))
     );
-    const actions = actionsFromDocument(parsePolicy(inlineRaw.InlinePolicy));
+    const documents: NamedPolicy[] = [];
+    const inlineDoc = parsePolicy(inlineRaw.InlinePolicy);
+    const actions = actionsFromDocument(inlineDoc);
     const policies: string[] = [];
-    if (actions.length) policies.push("Inline policy");
+    if (actions.length && inlineDoc) {
+      policies.push("Inline policy");
+      documents.push({ name: `${name} inline policy`, sourceType: "permission-set", document: inlineDoc });
+    }
     let unresolved = false;
     const managed = await withBackoff(() =>
       admin.send(new ListManagedPoliciesInPermissionSetCommand({ InstanceArn: instanceArn, PermissionSetArn: arn }))
@@ -612,7 +1044,10 @@ async function listSso(
       }
       const judged = levelForManagedPolicy(policy.Name, document ? actionsFromDocument(document) : null);
       if (judged.unresolved) unresolved = true;
-      if (document) actions.push(...actionsFromDocument(document));
+      if (document) {
+        actions.push(...actionsFromDocument(document));
+        documents.push({ name: policy.Name, sourceType: "managed", document });
+      }
     }
     const customer = await withBackoff(() =>
       admin.send(
@@ -640,6 +1075,7 @@ async function listSso(
       notableActions: access.notableActions,
       policies,
       unresolved,
+      documents,
       evidence: unresolved
         ? "One attached policy could not be read and is treated as Read/Write."
         : access.writeActions.length
@@ -649,6 +1085,7 @@ async function listSso(
   }
 
   const byUser = new Map<string, SsoUserRow>();
+  const docsByUser = new Map<string, NamedPolicy[]>();
   for (const person of people) {
     byUser.set(person.id, {
       population: "sso",
@@ -718,6 +1155,8 @@ async function listSso(
               unresolved: doc.unresolved,
             };
             row.assignments.push(item);
+            const priorDocs = docsByUser.get(principalId) ?? [];
+            docsByUser.set(principalId, priorDocs.concat(setDocs.get(permissionSetArn)?.documents ?? []));
             row.evidence.push({
               sourceType: "permission-set",
               name: doc.name,
@@ -731,14 +1170,22 @@ async function listSso(
     }
   }
 
+  const historyOk = trailOk || sessionsOk;
   const users = Array.from(byUser.values());
   for (const user of users) {
-    const hit = [user.userName, user.email]
-      .map((key) => trail.get(key.toLowerCase()))
-      .find((item) => item?.kind === "signin");
+    const keys = personKeys(user.userName, user.email);
+    const signin = latestHit(signins, keys);
+    const session = newerHit(latestHit(ssmSessions, keys), latestHit(trailSessions, keys));
+    const picked = pickActivity(
+      [
+        ...(signin ? [{ at: signin.at, kind: "signin" as const }] : []),
+        ...(session ? [{ at: session.at, kind: "session" as const }] : []),
+      ],
+      historyOk
+    );
     if (user.orphaned) {
       user.activity = { ...emptyActivity(), status: "unavailable", source: "unavailable" };
-    } else if (!trailOk) {
+    } else if (!historyOk) {
       user.activity = {
         at: null,
         status: "unavailable",
@@ -746,16 +1193,30 @@ async function listSso(
         targetName: null,
         forwardedHost: null,
         source: "unavailable",
-        note: "CloudTrail could not be searched, so this is not recorded as Never.",
+        kind: null,
+        note: "Sign-in and session history could not be read, so this is not recorded as Never.",
       };
-    } else if (hit) {
+    } else if (picked.kind === "session" && session) {
+      const named = instances.find((item) => item.id === session.instanceId);
       user.activity = {
-        at: hit.at,
+        at: session.at,
+        status: "known",
+        targetInstanceId: session.instanceId || null,
+        targetName: named?.name ?? (session.instanceId || null),
+        forwardedHost: session.forwardedHost,
+        source: session.source,
+        kind: "session",
+        note: "Session Manager session. CloudTrail can lag about 15 minutes. LookupEvents searches the last 90 days in the home region and us-east-1.",
+      };
+    } else if (picked.kind === "signin" && signin) {
+      user.activity = {
+        at: signin.at,
         status: "known",
         targetInstanceId: null,
         targetName: null,
         forwardedHost: null,
         source: "cloudtrail",
+        kind: "signin",
         note: "CloudTrail ConsoleLogin or UserAuthentication. Events can lag about 15 minutes and only the last 90 days are searched.",
       };
     } else {
@@ -767,7 +1228,75 @@ async function listSso(
     user.servicePreview = previewServices(user.services);
     if (user.assignments.length === 0) user.notes.push("No account assignments.");
   }
-  return { users };
+  const sessionUsers = users
+    .map((user) => identityCenterSsmRow(user, docsByUser.get(user.id) ?? [], instances, ssmSessions, trailSessions, historyOk))
+    .filter((row): row is SsmUserRow => row !== null);
+  return { users, sessionUsers };
+}
+
+function personKeys(...names: (string | null | undefined)[]): string[] {
+  const keys = new Set<string>();
+  for (const name of names) {
+    if (!name) continue;
+    for (const key of ownerKeys(name)) keys.add(key);
+    const local = name.split("@")[0]?.trim().toLowerCase();
+    if (local && local.length > 2 && local !== name.toLowerCase()) keys.add(local);
+  }
+  return Array.from(keys);
+}
+
+function latestHit(hits: Map<string, SessionHit>, keys: string[]): SessionHit | null {
+  let best: SessionHit | null = null;
+  for (const key of keys) {
+    const hit = hits.get(key);
+    if (hit && (!best || best.at < hit.at)) best = hit;
+  }
+  return best;
+}
+
+function newerHit(left: SessionHit | null, right: SessionHit | null): SessionHit | null {
+  if (!left) return right;
+  if (!right) return left;
+  return left.at >= right.at ? left : right;
+}
+
+function identityCenterSsmRow(
+  user: SsoUserRow,
+  documents: NamedPolicy[],
+  instances: LiveInstance[],
+  ssmSessions: Map<string, SessionHit>,
+  trailSessions: Map<string, SessionHit>,
+  historyOk: boolean
+): SsmUserRow | null {
+  if (user.orphaned) return null;
+  const allowed = documents.some((policy) => allowsStartSession(policy.document));
+  const keys = personKeys(user.userName, user.email, user.displayName);
+  const session = newerHit(latestHit(ssmSessions, keys), latestHit(trailSessions, keys));
+  if (!allowed && !session) return null;
+  const evaluated = documents.length
+    ? evaluateSsmAccess(documents, null, instances)
+    : { instances: [] as InstanceGrant[], unrestricted: false, evidence: [], notes: [] as string[] };
+  const activity = activityFor(
+    { userName: user.email || user.userName, arn: user.id, aliases: keys },
+    ssmSessions,
+    trailSessions,
+    instances,
+    historyOk
+  );
+  return {
+    population: "ssm",
+    origin: "identity-center",
+    id: `identity-center:${user.id}`,
+    userName: user.email || user.displayName || user.userName,
+    arn: user.email || user.userName,
+    activity,
+    instances: evaluated.instances,
+    unrestricted: evaluated.unrestricted,
+    inactive: isInactive(activity),
+    evidence: evaluated.evidence,
+    notes: evaluated.notes,
+    crossLink: null,
+  };
 }
 
 function emptyActivity(): Activity {
@@ -778,6 +1307,7 @@ function emptyActivity(): Activity {
     targetName: null,
     forwardedHost: null,
     source: "none",
+    kind: null,
     note: null,
   };
 }

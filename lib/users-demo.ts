@@ -1,5 +1,5 @@
 import { isInactive, linkPopulations, previewServices } from "@/lib/users-logic";
-import type { Activity, InstanceGrant, SsmUserRow, SsoUserRow, UsersPayload } from "@/lib/users-types";
+import type { Activity, IamPolicyRow, IamRoleRow, IamUserRow, InstanceGrant, SsmUserRow, SsoUserRow, UsersPayload } from "@/lib/users-types";
 import { SCP_NOTE } from "@/lib/users-types";
 
 const INSTANCES: InstanceGrant[] = [
@@ -378,6 +378,136 @@ export function demoUsers(): UsersPayload {
     scpNote: SCP_NOTE,
     ssm,
     sso,
+    iam: demoIam(),
+    roles: demoRoles(),
+    policies: demoPolicies(),
     instances: INSTANCES,
   };
+}
+
+function demoIam(): IamUserRow[] {
+  const rows: IamUserRow[] = [
+    {
+      population: "iam",
+      id: "dashboard-bot",
+      userName: "dashboard-bot",
+      arn: "arn:aws:iam::123456789012:user/dashboard-bot",
+      groups: [],
+      policies: [
+        { name: "DashboardRead", arn: "arn:aws:iam::123456789012:policy/DashboardRead", type: "Customer managed", attachedVia: "Directly" },
+      ],
+      permissionsBoundary: null,
+      tags: [{ key: "app", value: "dashboard" }],
+      passwordEnabled: false,
+      passwordLastUsed: null,
+      mfaDevices: [],
+      accessKeys: [
+        {
+          id: "AKIAEXAMPLEBOT0001",
+          status: "Active",
+          createdAt: daysAgo(40),
+          lastUsedAt: hoursAgo(1),
+          lastUsedRegion: "us-west-2",
+          lastUsedService: "iam",
+        },
+      ],
+      lastAccessed: [
+        { service: "AWS Identity and Access Management", lastAccessed: hoursAgo(1), region: "us-west-2" },
+        { service: "Amazon S3", lastAccessed: null, region: null },
+      ],
+      lastAccessedStatus: "known",
+      activity: activity({
+        at: hoursAgo(1),
+        status: "known",
+        source: "none",
+        note: "An access key was used. This is the IAM user record, not a Session Manager session.",
+      }),
+      inactive: false,
+    },
+    {
+      population: "iam",
+      id: "svc-mail",
+      userName: "svc-mail",
+      arn: "arn:aws:iam::123456789012:user/svc-mail",
+      groups: [
+        {
+          name: "mail",
+          arn: "arn:aws:iam::123456789012:group/mail",
+          createdAt: daysAgo(200),
+          policies: ["AmazonSESFullAccess"],
+        },
+      ],
+      policies: [
+        {
+          name: "AmazonSESFullAccess",
+          arn: "arn:aws:iam::aws:policy/AmazonSESFullAccess",
+          type: "AWS managed",
+          attachedVia: "mail",
+        },
+      ],
+      permissionsBoundary: null,
+      tags: [],
+      passwordEnabled: true,
+      passwordLastUsed: daysAgo(120),
+      mfaDevices: ["arn:aws:iam::123456789012:mfa/svc-mail"],
+      accessKeys: [
+        {
+          id: "AKIAEXAMPLEMAIL001",
+          status: "Active",
+          createdAt: daysAgo(80),
+          lastUsedAt: daysAgo(15),
+          lastUsedRegion: "us-west-2",
+          lastUsedService: "ses",
+        },
+      ],
+      lastAccessed: [{ service: "Amazon Simple Email Service", lastAccessed: daysAgo(15), region: "us-west-2" }],
+      lastAccessedStatus: "known",
+      activity: activity({
+        at: daysAgo(15),
+        status: "known",
+        source: "none",
+        note: "An access key was used. This is the IAM user record, not a Session Manager session.",
+      }),
+      inactive: false,
+    },
+  ];
+  for (const row of rows) row.inactive = isInactive(row.activity);
+  return rows;
+}
+
+function demoRoles(): IamRoleRow[] {
+  return [
+    {
+      population: "role",
+      id: "arn:aws:iam::123456789012:role/app-runtime",
+      roleName: "app-runtime",
+      arn: "arn:aws:iam::123456789012:role/app-runtime",
+      trustedEntities: ["ec2.amazonaws.com"],
+      lastUsedAt: hoursAgo(3),
+      createdAt: daysAgo(300),
+    },
+  ];
+}
+
+function demoPolicies(): IamPolicyRow[] {
+  return [
+    {
+      population: "policy",
+      id: "arn:aws:iam::123456789012:policy/DashboardRead",
+      name: "DashboardRead",
+      arn: "arn:aws:iam::123456789012:policy/DashboardRead",
+      type: "Customer managed",
+      attachmentCount: 1,
+      description: "Read IAM users for the dashboard.",
+    },
+    {
+      population: "policy",
+      id: "arn:aws:iam::aws:policy/AmazonSESFullAccess",
+      name: "AmazonSESFullAccess",
+      arn: "arn:aws:iam::aws:policy/AmazonSESFullAccess",
+      type: "AWS managed",
+      attachmentCount: 1,
+      description: null,
+    },
+  ];
 }

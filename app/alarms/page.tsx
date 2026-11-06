@@ -196,7 +196,6 @@ export default function AlarmsPage() {
               label={tab.label}
               value={summary ? `${summary.alarm}` : "—"}
               caption={summary ? `${summary.alarm} in alarm · ${total} total` : "Waiting for data"}
-              pct={total ? (summary!.alarm / total) * 100 : 0}
               tone={tone}
               icon={icon}
               active={service === tab.id}

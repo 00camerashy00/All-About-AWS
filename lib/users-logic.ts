@@ -582,6 +582,17 @@ export function previewServices(services: string[] | "all"): string {
   return `${services.slice(0, 3).join(", ")} +${services.length - 3} more`;
 }
 
+export function pickActivity(
+  candidates: { at: string; kind: "signin" | "session" }[],
+  historyOk: boolean
+): { at: string | null; status: Activity["status"]; kind: "signin" | "session" | null } {
+  const sorted = candidates.filter((item) => item.at).slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  if (!sorted.length) {
+    return { at: null, status: historyOk ? "known" : "unavailable", kind: null };
+  }
+  return { at: sorted[0].at, status: "known", kind: sorted[0].kind };
+}
+
 export function isInactive(activity: Activity, now = Date.now()): boolean {
   if (activity.status === "unavailable") return false;
   if (!activity.at) return true;

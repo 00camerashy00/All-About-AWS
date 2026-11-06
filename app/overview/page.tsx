@@ -17,7 +17,6 @@ type Stat = {
   label: string;
   value: string;
   caption: string;
-  pct: number;
   tone: StatTone;
 };
 
@@ -254,7 +253,6 @@ export default function OverviewPage() {
             label={card.stat.label}
             value={card.stat.value}
             caption={card.stat.caption}
-            pct={card.stat.pct}
             tone={card.stat.tone}
             icon={statIcon[card.stat.label as keyof typeof statIcon] ?? TriangleAlert}
             action={
@@ -466,13 +464,10 @@ function userStat(data: UsersPayload): Stat {
   const ssm = data.ssm.length;
   const sso = data.sso.length;
   const total = ssm + sso;
-  const inactive =
-    data.ssm.filter((row) => row.inactive).length + data.sso.filter((row) => row.inactive).length;
   return {
     label: "Users",
     value: `${total}`,
     caption: `${ssm} SSM · ${sso} SSO`,
-    pct: total ? ((total - inactive) / total) * 100 : 0,
     tone: "slate",
   };
 }
@@ -485,9 +480,9 @@ function demoBoard(): Board {
   const healthy = resources.length - flagged.length;
   return {
     stats: [
-      { label: "Servers", value: `${servers.length}`, caption: `${servers.filter((s) => s.status === "healthy").length} running normally`, pct: (servers.filter((s) => s.status === "healthy").length / servers.length) * 100, tone: "slate" },
-      { label: "Databases", value: `${databases.length}`, caption: `${databases.filter((d) => d.status !== "healthy").length} need a look`, pct: 70, tone: "amber" },
-      { label: "Buckets", value: `${buckets.length}`, caption: "File storage in this sample", pct: 50, tone: "yellow" },
+      { label: "Servers", value: `${servers.length}`, caption: `${servers.filter((s) => s.status === "healthy").length} running normally`, tone: "slate" },
+      { label: "Databases", value: `${databases.length}`, caption: `${databases.filter((d) => d.status !== "healthy").length} need a look`, tone: "amber" },
+      { label: "Buckets", value: `${buckets.length}`, caption: "File storage in this sample", tone: "yellow" },
     ],
     gauge: { pct: Math.round((healthy / resources.length) * 100), value: `${healthy}`, goal: `of ${resources.length}`, caption: `${healthy} of ${resources.length} resources` },
     plan: { pct: Math.round((flagged.length / resources.length) * 100), left: "0 flagged", right: `${resources.length} resources`, caption: `${flagged.length} still need a decision.` },
@@ -516,9 +511,9 @@ function liveBoard(inv: Inventory): Board {
   const total = Math.max(1, servers + databases + buckets);
   return {
     stats: [
-      { label: "Servers", value: `${servers}`, caption: `${running} running`, pct: servers ? (running / servers) * 100 : 0, tone: "slate" },
-      { label: "Databases", value: `${databases}`, caption: `${available} available`, pct: databases ? (available / databases) * 100 : 0, tone: "amber" },
-      { label: "Buckets", value: `${buckets}`, caption: inv.buckets.filter((bucket) => !bucket.lifecycle).length ? `${inv.buckets.filter((bucket) => !bucket.lifecycle).length} without cleanup rules` : "Cleanup rules are on", pct: buckets ? 100 : 0, tone: "yellow" },
+      { label: "Servers", value: `${servers}`, caption: `${running} running`, tone: "slate" },
+      { label: "Databases", value: `${databases}`, caption: `${available} available`, tone: "amber" },
+      { label: "Buckets", value: `${buckets}`, caption: inv.buckets.filter((bucket) => !bucket.lifecycle).length ? `${inv.buckets.filter((bucket) => !bucket.lifecycle).length} without cleanup rules` : "Cleanup rules are on", tone: "yellow" },
     ],
     gauge: {
       pct: Math.round((healthy / total) * 100),

@@ -642,7 +642,6 @@ export default function ResourcesPage() {
         ? `${inv.buckets.filter((bucket) => !bucket.lifecycle).length} without cleanup rules`
         : "Cleanup rules are on"
       : "File storage in this sample";
-  const catalog = Math.max(1, serverTotal + dbTotal + bucketTotal);
 
   return (
     <div>
@@ -678,10 +677,10 @@ export default function ResourcesPage() {
       )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Servers" value={`${serverTotal}`} caption={serverCaption} pct={serverTotal ? (serverOk / serverTotal) * 100 : 0} tone="slate" icon={Server} active={tab === "servers"} onClick={() => openTab("servers")} />
-        <StatCard label="Databases" value={`${dbTotal}`} caption={`${dbOk} ${databasesLive && inv ? "available" : "need no decision"}`} pct={dbTotal ? (dbOk / dbTotal) * 100 : 0} tone="amber" icon={Database} active={tab === "databases"} onClick={() => openTab("databases")} />
-        <StatCard label="Buckets" value={`${bucketTotal}`} caption={bucketCaption} pct={bucketTotal ? 100 : 0} tone="yellow" icon={HardDrive} active={tab === "storage"} onClick={() => openTab("storage")} />
-        <StatCard label="Needs attention" value={`${wasteCount}`} caption={wasteCount ? "Open this card for the reason" : "Nothing flagged"} pct={(wasteCount / catalog) * 100} tone="red" icon={TriangleAlert} active={tab === "attention"} onClick={() => openTab("attention")} />
+        <StatCard label="Servers" value={`${serverTotal}`} caption={serverCaption} tone="slate" icon={Server} active={tab === "servers"} onClick={() => openTab("servers")} />
+        <StatCard label="Databases" value={`${dbTotal}`} caption={`${dbOk} ${databasesLive && inv ? "available" : "need no decision"}`} tone="amber" icon={Database} active={tab === "databases"} onClick={() => openTab("databases")} />
+        <StatCard label="Buckets" value={`${bucketTotal}`} caption={bucketCaption} tone="yellow" icon={HardDrive} active={tab === "storage"} onClick={() => openTab("storage")} />
+        <StatCard label="Needs attention" value={`${wasteCount}`} caption={wasteCount ? "Open this card for the reason" : "Nothing flagged"} tone="red" icon={TriangleAlert} active={tab === "attention"} onClick={() => openTab("attention")} />
       </div>
 
       {tab === "servers" && (

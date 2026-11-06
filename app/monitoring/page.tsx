@@ -429,14 +429,12 @@ export default function MonitoringPage() {
       <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {(Object.keys(HEALTH_META) as Health[]).map((key) => {
           const tone: StatTone = key === "overloaded" ? "red" : key === "medium" ? "amber" : key === "healthy" ? "yellow" : "slate";
-          const total = Math.max(1, matched.length);
           return (
             <StatCard
               key={key}
               label={HEALTH_META[key].label}
               value={`${counts[key]}`}
               caption={status === key ? "Showing this group" : `${matched.length} in this list`}
-              pct={(counts[key] / total) * 100}
               tone={tone}
               icon={HEALTH_META[key].Icon}
               active={status === key}

@@ -1,17 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Clock, Download, RefreshCw, ShieldAlert, Unlink, Users } from "lucide-react";
+import { Download, RefreshCw, ScrollText, Shield, Users } from "lucide-react";
+import { IamUserDetail } from "@/components/iam-user-detail";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { useAccount } from "@/components/account-provider";
 import { demoUsers } from "@/lib/users-demo";
-import type { InstanceGrant, ServiceGrant, SsmUserRow, SsoAssignment, SsoUserRow, UsersPayload } from "@/lib/users-types";
+import type { IamPolicyRow, IamRoleRow, IamUserRow, InstanceGrant, ServiceGrant, SsmUserRow, SsoAssignment, SsoUserRow, UsersPayload } from "@/lib/users-types";
 
 const PAGE_SIZE = 4;
 
 type SortKey = "user" | "login" | "access" | "scope";
-type UserView = "ssm" | "sso" | "inactive" | "orphaned";
+type UserView = "ssm" | "sso" | "iam" | "roles" | "policies";
+type DirectoryKind = "ssm" | "sso" | "iam" | "role" | "policy";
+type DirectoryRow = SsmUserRow | SsoUserRow | IamUserRow | IamRoleRow | IamPolicyRow;
 
 function formatWhen(at: string | null, status: "known" | "unavailable"): string {
   if (status === "unavailable") return "Unavailable";
@@ -141,12 +144,14 @@ export default function UsersPage() {
   }, [account.configured, revision, refreshTick]);
 
   const data = payload ?? demoUsers();
-  const kind = view === "sso" || view === "orphaned" ? "sso" : "ssm";
+  const kind: DirectoryKind =
+    view === "sso" ? "sso" : view === "iam" ? "iam" : view === "roles" ? "role" : view === "policies" ? "policy" : "ssm";
   const rows = useMemo(() => {
     if (view === "ssm") return data.ssm;
     if (view === "sso") return data.sso;
-    if (view === "inactive") return data.ssm.filter((row) => row.inactive);
-    if (view === "orphaned") return data.sso.filter((row) => row.orphaned);
+    if (view === "iam") return data.iam ?? [];
+    if (view === "roles") return data.roles ?? [];
+    if (view === "policies") return data.policies ?? [];
     return [];
   }, [data, view]);
 
@@ -160,18 +165,31 @@ export default function UsersPage() {
     const list = rows.slice();
     const dir = sortDir === "asc" ? 1 : -1;
     list.sort((a, b) => {
-      const value = (row: SsmUserRow | SsoUserRow) => {
-        if (sortKey === "login") return loginValue(row.activity.at, row.activity.status);
+      const value = (row: DirectoryRow) => {
+        if (sortKey === "login") {
+          if (row.population === "role") return loginValue(row.lastUsedAt, "known");
+          if (row.population === "policy") return row.attachmentCount;
+          return loginValue(row.activity.at, row.activity.status);
+        }
         if (sortKey === "access") {
-          return kind === "sso" ? (row as SsoUserRow).accessLevel : instanceLabel(row as SsmUserRow);
+          if (row.population === "sso") return row.accessLevel;
+          if (row.population === "iam") return row.groups.map((group) => group.name).join(", ");
+          if (row.population === "policy") return row.type;
+          if (row.population === "role") return row.trustedEntities.join(", ");
+          return instanceLabel(row);
         }
         if (sortKey === "scope") {
-          if (kind === "sso") return (row as SsoUserRow).servicePreview;
-          const user = row as SsmUserRow;
-          if (user.instances === "all") return 1_000_000;
-          return user.instances.length;
+          if (row.population === "sso") return row.servicePreview;
+          if (row.population === "iam") return row.groups.length;
+          if (row.population === "role") return row.trustedEntities.length;
+          if (row.population === "policy") return row.attachmentCount;
+          if (row.instances === "all") return 1_000_000;
+          return row.instances.length;
         }
-        return kind === "sso" ? (row as SsoUserRow).displayName : (row as SsmUserRow).userName;
+        if (row.population === "sso") return row.displayName;
+        if (row.population === "role") return row.roleName;
+        if (row.population === "policy") return row.name;
+        return row.userName;
       };
       const left = value(a);
       const right = value(b);
@@ -197,10 +215,32 @@ export default function UsersPage() {
 
   const exportCsv = () => {
     const header =
-      kind === "ssm"
-        ? ["User", "ARN", "Last login", "Target", "Permitted instances", "Inactive"]
-        : ["User", "Email", "Display name", "Last login", "Access level", "Services", "Accounts", "Inactive"];
+      kind === "role"
+        ? ["Role", "ARN", "Trusted entities", "Last activity"]
+        : kind === "policy"
+          ? ["Policy", "ARN", "Type", "Attachments", "Description"]
+        : kind === "iam"
+          ? ["User", "ARN", "Last activity", "How it was used", "Groups", "Inactive"]
+          : kind === "ssm"
+            ? ["User", "ARN", "Last login", "Target", "Permitted instances", "Inactive"]
+            : ["User", "Email", "Display name", "Last login", "Access level", "Services", "Accounts", "Inactive"];
     const lines = filtered.map((row) => {
+      if (row.population === "role") {
+        return [row.roleName, row.arn, row.trustedEntities.join("; "), formatWhen(row.lastUsedAt, "known")];
+      }
+      if (row.population === "policy") {
+        return [row.name, row.arn, row.type, String(row.attachmentCount), row.description ?? ""];
+      }
+      if (row.population === "iam") {
+        return [
+          row.userName,
+          row.arn,
+          formatWhen(row.activity.at, row.activity.status),
+          row.activity.note ?? "",
+          row.groups.map((group) => group.name).join("; "),
+          row.inactive ? "yes" : "no",
+        ];
+      }
       if (row.population === "ssm") {
         return [
           row.userName,
@@ -227,22 +267,22 @@ export default function UsersPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = kind === "ssm" ? "ssm-users.csv" : "sso-users.csv";
+    link.download =
+      kind === "role" ? "iam-roles.csv" : kind === "policy" ? "iam-policies.csv" : kind === "iam" ? "iam-users.csv" : kind === "ssm" ? "ssm-users.csv" : "sso-users.csv";
     link.click();
     URL.revokeObjectURL(url);
   };
 
-  const inactiveCount = data.ssm.filter((row) => row.inactive).length;
   const ssmRows = data.ssm;
   const wide = ssmRows.filter((row) => row.unrestricted).length;
-  const orphans = data.sso.filter((row) => row.orphaned).length;
-  const people = Math.max(1, data.ssm.length + data.sso.length);
+  const roleCount = (data.roles ?? []).length;
+  const policyCount = (data.policies ?? []).length;
 
   return (
     <div>
       <PageHeader
         title="Users"
-        subtitle="SSM users and SSO users are separate directories. They are never combined into one list."
+        subtitle="IAM users, roles, and policies are the IAM directory. Session Manager still lists only people who can start a session. The SSO directory stays separate."
         action={
           <span className="flex items-center gap-2">
             {account.configured && (
@@ -263,11 +303,12 @@ export default function UsersPage() {
         }
       />
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="SSM users" value={`${data.ssm.length}`} caption={`${wide} unrestricted`} pct={(data.ssm.length / people) * 100} tone="slate" icon={Users} active={view === "ssm"} onClick={() => openView("ssm")} />
-        <StatCard label="SSO users" value={`${data.sso.length}`} caption="Identity Center, including orphans" pct={(data.sso.length / people) * 100} tone="yellow" icon={Users} active={view === "sso"} onClick={() => openView("sso")} />
-        <StatCard label="Inactive SSM" value={`${inactiveCount}`} caption="Never, or no activity for 90 days" pct={data.ssm.length ? (inactiveCount / data.ssm.length) * 100 : 0} tone="amber" icon={Clock} active={view === "inactive"} onClick={() => openView("inactive")} />
-        <StatCard label="Orphaned SSO" value={`${orphans}`} caption={wide ? `${wide} SSM ${wide === 1 ? "user can" : "users can"} reach every instance` : "No unrestricted SSM access"} pct={data.sso.length ? (orphans / data.sso.length) * 100 : 0} tone="red" icon={orphans ? Unlink : ShieldAlert} active={view === "orphaned"} onClick={() => openView("orphaned")} />
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <StatCard label="SSM users" value={`${data.ssm.length}`} caption={`${wide} unrestricted`} tone="slate" icon={Users} active={view === "ssm"} onClick={() => openView("ssm")} />
+        <StatCard label="SSO users" value={`${data.sso.length}`} caption="Identity Center, including orphans" tone="yellow" icon={Users} active={view === "sso"} onClick={() => openView("sso")} />
+        <StatCard label="IAM users" value={`${(data.iam ?? []).length}`} caption="Every IAM user in this account" tone="slate" icon={Users} active={view === "iam"} onClick={() => openView("iam")} />
+        <StatCard label="Roles" value={`${roleCount}`} caption="IAM roles in this account" tone="yellow" icon={Shield} active={view === "roles"} onClick={() => openView("roles")} />
+        <StatCard label="Policies" value={`${policyCount}`} caption="Customer managed, and AWS managed policies in use" tone="amber" icon={ScrollText} active={view === "policies"} onClick={() => openView("policies")} />
       </div>
 
       {(error || data.warnings.length > 0) && (
@@ -295,10 +336,22 @@ export default function UsersPage() {
           <table className="w-full min-w-[760px] text-left text-sm">
             <thead>
               <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-gray-400">
-                <SortHeader label="User" active={sortKey === "user"} dir={sortDir} onClick={() => toggleSort("user")} />
-                <SortHeader label="Last login activity" active={sortKey === "login"} dir={sortDir} onClick={() => toggleSort("login")} />
+                <SortHeader label={kind === "role" ? "Role" : kind === "policy" ? "Policy" : "User"} active={sortKey === "user"} dir={sortDir} onClick={() => toggleSort("user")} />
+                {kind === "role" ? (
+                  <SortHeader label="Trusted entities" active={sortKey === "scope"} dir={sortDir} onClick={() => toggleSort("scope")} />
+                ) : kind === "policy" ? (
+                  <SortHeader label="Type" active={sortKey === "access"} dir={sortDir} onClick={() => toggleSort("access")} />
+                ) : (
+                  <SortHeader label={kind === "iam" ? "Last activity" : "Last login activity"} active={sortKey === "login"} dir={sortDir} onClick={() => toggleSort("login")} />
+                )}
                 {kind === "ssm" ? (
                   <SortHeader label="Permitted instances" active={sortKey === "scope"} dir={sortDir} onClick={() => toggleSort("scope")} />
+                ) : kind === "iam" ? (
+                  <SortHeader label="Groups" active={sortKey === "scope"} dir={sortDir} onClick={() => toggleSort("scope")} />
+                ) : kind === "role" ? (
+                  <SortHeader label="Last activity" active={sortKey === "login"} dir={sortDir} onClick={() => toggleSort("login")} />
+                ) : kind === "policy" ? (
+                  <SortHeader label="Attachments" active={sortKey === "scope"} dir={sortDir} onClick={() => toggleSort("scope")} />
                 ) : (
                   <>
                     <SortHeader label="Access level" active={sortKey === "access"} dir={sortDir} onClick={() => toggleSort("access")} />
@@ -311,16 +364,29 @@ export default function UsersPage() {
               {visible.map((row) => (
                 <tr
                   key={row.id}
-                  onClick={() => setSelectedId(row.id)}
-                  className="cursor-pointer hover:bg-gray-50/80"
+                  onClick={() => {
+                    if (row.population === "role" || row.population === "policy") return;
+                    setSelectedId(row.id);
+                  }}
+                  className={row.population === "role" || row.population === "policy" ? "" : "cursor-pointer hover:bg-gray-50/80"}
                 >
-                  {row.population === "ssm" ? <SsmCells user={row} /> : <SsoCells user={row} />}
+                  {row.population === "ssm" ? (
+                    <SsmCells user={row} />
+                  ) : row.population === "iam" ? (
+                    <IamCells user={row} />
+                  ) : row.population === "role" ? (
+                    <RoleCells role={row} />
+                  ) : row.population === "policy" ? (
+                    <PolicyCells policy={row} />
+                  ) : (
+                    <SsoCells user={row} />
+                  )}
                 </tr>
               ))}
               {visible.length === 0 && (
                 <tr>
-                  <td colSpan={kind === "ssm" ? 3 : 4} className="px-4 py-8 text-center text-sm text-gray-500">
-                    No users in this group.
+                  <td colSpan={kind === "sso" ? 4 : 3} className="px-4 py-8 text-center text-sm text-gray-500">
+                    {kind === "role" ? "No roles in this account." : kind === "policy" ? "No policies in this account." : "No users in this group."}
                   </td>
                 </tr>
               )}
@@ -330,7 +396,7 @@ export default function UsersPage() {
         <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3 text-xs text-gray-500">
           <span>
             {filtered.length === 0
-              ? "0 users"
+              ? `0 ${kind === "role" ? "roles" : kind === "policy" ? "policies" : "users"}`
               : `${safePage * PAGE_SIZE + 1}–${Math.min(filtered.length, safePage * PAGE_SIZE + PAGE_SIZE)} of ${filtered.length}`}
           </span>
           <span className="flex gap-2">
@@ -355,7 +421,12 @@ export default function UsersPage() {
       </div>
       )}
 
-      {selected && view && <Detail row={selected} onClose={() => setSelectedId(null)} />}
+      {selected && view && selected.population === "iam" && (
+        <IamUserDetail user={selected} onClose={() => setSelectedId(null)} />
+      )}
+      {selected && view && (selected.population === "ssm" || selected.population === "sso") && (
+        <Detail row={selected} onClose={() => setSelectedId(null)} />
+      )}
     </div>
   );
 }
@@ -390,6 +461,7 @@ function SsmCells({ user }: { user: SsmUserRow }) {
         </p>
         <p className="text-xs text-gray-500">
           {user.inactive && <Badge tone="amber">Inactive</Badge>}
+          {user.origin === "identity-center" && <Badge tone="gray">Identity Center</Badge>}
           {user.crossLink && <span className="ml-1">Also SSO · {user.crossLink.label}</span>}
         </p>
       </td>
@@ -417,12 +489,68 @@ function SsmCells({ user }: { user: SsmUserRow }) {
   );
 }
 
+function RoleCells({ role }: { role: IamRoleRow }) {
+  return (
+    <>
+      <td className="px-4 py-3">
+        <p className="font-medium" title={role.arn}>{role.roleName}</p>
+        <p className="text-xs text-gray-500">IAM role</p>
+      </td>
+      <td className="px-4 py-3 text-gray-700">{role.trustedEntities.length ? role.trustedEntities.join(", ") : "None"}</td>
+      <td className="px-4 py-3 text-gray-700">{formatWhen(role.lastUsedAt, "known")}</td>
+    </>
+  );
+}
+
+function PolicyCells({ policy }: { policy: IamPolicyRow }) {
+  return (
+    <>
+      <td className="px-4 py-3">
+        <p className="font-medium" title={policy.arn}>{policy.name}</p>
+        {policy.description && <p className="text-xs text-gray-500">{policy.description}</p>}
+      </td>
+      <td className="px-4 py-3 text-gray-700">{policy.type}</td>
+      <td className="px-4 py-3 text-gray-700">{policy.attachmentCount}</td>
+    </>
+  );
+}
+
+function IamCells({ user }: { user: IamUserRow }) {
+  const used =
+    user.activity.status === "unavailable"
+      ? "Access key history could not be read"
+      : user.activity.kind === "signin"
+        ? "Console password"
+        : user.activity.at
+          ? "Access key"
+          : "No password or access key use recorded";
+  return (
+    <>
+      <td className="px-4 py-3">
+        <p className="font-medium" title={user.arn}>{user.userName}</p>
+        <p className="text-xs text-gray-500">
+          IAM user
+          {user.inactive && <Badge tone="amber">Inactive</Badge>}
+        </p>
+      </td>
+      <td className="px-4 py-3 text-gray-700">
+        <p>{formatWhen(user.activity.at, user.activity.status)}</p>
+        <p className="text-xs text-gray-500">{used}</p>
+      </td>
+      <td className="px-4 py-3 text-gray-700">{user.groups.length ? user.groups.map((group) => group.name).join(", ") : "None"}</td>
+    </>
+  );
+}
+
+function ssoActivityLine(user: SsoUserRow): string {
+  if (user.activity.status === "unavailable") return "Sign-in history could not be read";
+  if (user.activity.kind === "session" && user.activity.at) return "Session Manager";
+  if (user.activity.at) return "Console sign-in";
+  return "No console sign-in or Session Manager session in the last 90 days";
+}
+
 function SsoCells({ user }: { user: SsoUserRow }) {
-  const signIn = user.activity.status === "unavailable"
-    ? "Sign-in history could not be read"
-    : user.activity.at
-      ? "Console sign-in"
-      : "No console sign-in in the last 90 days";
+  const signIn = ssoActivityLine(user);
   return (
     <>
       <td className="px-4 py-3">
@@ -472,9 +600,15 @@ function Detail({ row, onClose }: { row: SsmUserRow | SsoUserRow; onClose: () =>
   const activityDetail = row.population === "sso"
     ? row.activity.status === "unavailable"
       ? row.activity.note ?? "Sign-in history could not be read."
-      : row.activity.at
-        ? "Console sign-in recorded by CloudTrail. This is not a shell session."
-        : "No CloudTrail console sign-in in the home region or us-east-1 for the last 90 days."
+      : row.activity.kind === "session" && row.activity.at
+        ? row.activity.targetName
+          ? `Session Manager session on ${row.activity.targetName}. This is not a console sign-in.`
+          : "Session Manager session. This is not a console sign-in."
+        : row.activity.at
+          ? "Console sign-in recorded by CloudTrail. This is not a shell session."
+          : "No console sign-in or Session Manager session in the last 90 days."
+    : row.population === "ssm" && row.origin === "identity-center" && row.activity.targetName
+      ? `Session Manager session on ${row.activity.targetName}. This row is the Identity Center user, kept separate from any IAM user.`
     : row.activity.targetName
       ? `Session Manager session on ${row.activity.targetName}.`
       : row.activity.status === "known" && !row.activity.at
@@ -487,10 +621,10 @@ function Detail({ row, onClose }: { row: SsmUserRow | SsoUserRow; onClose: () =>
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-              {row.population === "ssm" ? "IAM user" : "Identity Center"}
+              {row.population === "sso" || (row.population === "ssm" && row.origin === "identity-center") ? "Identity Center" : "IAM user"}
             </p>
-            <h2 className="mt-1 text-lg font-semibold">{row.population === "ssm" ? row.userName : row.displayName}</h2>
-            <p className="mt-1 break-all text-xs text-gray-500">{row.population === "ssm" ? row.arn : row.email || row.userName}</p>
+            <h2 className="mt-1 text-lg font-semibold">{row.population === "sso" ? row.displayName : row.userName}</h2>
+            <p className="mt-1 break-all text-xs text-gray-500">{row.population === "sso" ? row.email || row.userName : row.arn}</p>
             <div className="mt-2">
               {sso ? <AccessPill level={sso.accessLevel} /> : row.inactive ? <Badge tone="amber">Inactive</Badge> : <Badge tone="green">Active</Badge>}
             </div>
