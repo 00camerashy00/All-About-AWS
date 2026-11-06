@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { IamUserRow } from "@/lib/users-types";
 
-type Tab = "permissions" | "groups" | "tags" | "credentials" | "accessed";
+type Tab = "permissions" | "groups" | "accessed";
 
 function formatWhen(at: string | null): string {
   if (!at) return "—";
@@ -23,8 +23,6 @@ export function IamUserDetail({ user, onClose }: { user: IamUserRow; onClose: ()
   const tabs: { id: Tab; label: string }[] = [
     { id: "permissions", label: "Permissions" },
     { id: "groups", label: `Groups (${user.groups.length})` },
-    { id: "tags", label: `Tags (${user.tags.length})` },
-    { id: "credentials", label: "Security credentials" },
     { id: "accessed", label: "Last accessed" },
   ];
 
@@ -59,8 +57,6 @@ export function IamUserDetail({ user, onClose }: { user: IamUserRow; onClose: ()
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {tab === "permissions" && <Permissions user={user} />}
           {tab === "groups" && <Groups user={user} />}
-          {tab === "tags" && <Tags user={user} />}
-          {tab === "credentials" && <Credentials user={user} />}
           {tab === "accessed" && <LastAccessed user={user} accessed={accessed.length} quiet={quiet} />}
         </div>
       </aside>
@@ -91,51 +87,6 @@ function Groups({ user }: { user: IamUserRow }) {
       empty="This user is not in any group."
       rows={user.groups.map((group) => [group.name, group.policies.length ? group.policies.join(", ") : "None"])}
     />
-  );
-}
-
-function Tags({ user }: { user: IamUserRow }) {
-  return (
-    <DataTable
-      headers={["Key", "Value"]}
-      empty="No tags."
-      rows={user.tags.map((tag) => [tag.key, tag.value || "—"])}
-    />
-  );
-}
-
-function Credentials({ user }: { user: IamUserRow }) {
-  const password =
-    user.passwordEnabled == null ? "Could not be read" : user.passwordEnabled ? "Enabled" : "Disabled";
-  return (
-    <div className="space-y-6">
-      <section>
-        <h3 className="text-sm font-semibold">Console sign-in</h3>
-        <DataTable
-          headers={["Console password", "Password last used", "MFA"]}
-          rows={[[
-            password,
-            formatWhen(user.passwordLastUsed),
-            user.mfaDevices.length ? user.mfaDevices.join(", ") : "Not assigned",
-          ]]}
-        />
-      </section>
-      <section>
-        <h3 className="text-sm font-semibold">Access keys</h3>
-        <DataTable
-          headers={["Access key ID", "Status", "Created", "Last used", "Service", "Region"]}
-          empty="No access keys."
-          rows={user.accessKeys.map((key) => [
-            key.id,
-            key.status,
-            formatWhen(key.createdAt),
-            formatWhen(key.lastUsedAt),
-            key.lastUsedService ?? "—",
-            key.lastUsedRegion ?? "—",
-          ])}
-        />
-      </section>
-    </div>
   );
 }
 

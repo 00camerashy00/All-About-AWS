@@ -397,20 +397,6 @@ function demoIam(): IamUserRow[] {
         { name: "DashboardRead", arn: "arn:aws:iam::123456789012:policy/DashboardRead", type: "Customer managed", attachedVia: "Directly" },
       ],
       permissionsBoundary: null,
-      tags: [{ key: "app", value: "dashboard" }],
-      passwordEnabled: false,
-      passwordLastUsed: null,
-      mfaDevices: [],
-      accessKeys: [
-        {
-          id: "AKIAEXAMPLEBOT0001",
-          status: "Active",
-          createdAt: daysAgo(40),
-          lastUsedAt: hoursAgo(1),
-          lastUsedRegion: "us-west-2",
-          lastUsedService: "iam",
-        },
-      ],
       lastAccessed: [
         { service: "AWS Identity and Access Management", lastAccessed: hoursAgo(1), region: "us-west-2" },
         { service: "Amazon S3", lastAccessed: null, region: null },
@@ -446,20 +432,6 @@ function demoIam(): IamUserRow[] {
         },
       ],
       permissionsBoundary: null,
-      tags: [],
-      passwordEnabled: true,
-      passwordLastUsed: daysAgo(120),
-      mfaDevices: ["arn:aws:iam::123456789012:mfa/svc-mail"],
-      accessKeys: [
-        {
-          id: "AKIAEXAMPLEMAIL001",
-          status: "Active",
-          createdAt: daysAgo(80),
-          lastUsedAt: daysAgo(15),
-          lastUsedRegion: "us-west-2",
-          lastUsedService: "ses",
-        },
-      ],
       lastAccessed: [{ service: "Amazon Simple Email Service", lastAccessed: daysAgo(15), region: "us-west-2" }],
       lastAccessedStatus: "known",
       activity: activity({

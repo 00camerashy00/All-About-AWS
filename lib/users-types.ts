@@ -106,20 +106,6 @@ export interface IamGroupMembership {
   policies: string[];
 }
 
-export interface IamTag {
-  key: string;
-  value: string;
-}
-
-export interface IamAccessKey {
-  id: string;
-  status: "Active" | "Inactive";
-  createdAt: string | null;
-  lastUsedAt: string | null;
-  lastUsedRegion: string | null;
-  lastUsedService: string | null;
-}
-
 export interface IamServiceAccess {
   service: string;
   lastAccessed: string | null;
@@ -135,11 +121,6 @@ export interface IamUserRow {
   groups: IamGroupMembership[];
   policies: IamPolicyAttachment[];
   permissionsBoundary: string | null;
-  tags: IamTag[];
-  passwordEnabled: boolean | null;
-  passwordLastUsed: string | null;
-  mfaDevices: string[];
-  accessKeys: IamAccessKey[];
   lastAccessed: IamServiceAccess[];
   lastAccessedStatus: ActivityStatus;
   inactive: boolean;

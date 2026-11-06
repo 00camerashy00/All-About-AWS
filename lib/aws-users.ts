@@ -7,7 +7,6 @@ import {
   GenerateServiceLastAccessedDetailsCommand,
   GetAccessKeyLastUsedCommand,
   GetGroupPolicyCommand,
-  GetLoginProfileCommand,
   GetPolicyCommand,
   GetPolicyVersionCommand,
   GetServiceLastAccessedDetailsCommand,
@@ -19,12 +18,10 @@ import {
   ListAttachedUserPoliciesCommand,
   ListGroupPoliciesCommand,
   ListGroupsForUserCommand,
-  ListMFADevicesCommand,
   ListPoliciesCommand,
   ListRolesCommand,
   ListUserPoliciesCommand,
   ListUsersCommand,
-  ListUserTagsCommand,
 } from "@aws-sdk/client-iam";
 import {
   DescribeSessionsCommand,
@@ -75,13 +72,11 @@ import {
 } from "@/lib/users-logic";
 import type {
   Activity,
-  IamAccessKey,
   IamGroupMembership,
   IamPolicyAttachment,
   IamPolicyRow,
   IamRoleRow,
   IamServiceAccess,
-  IamTag,
   IamUserRow,
   InstanceGrant,
   SsmUserRow,
@@ -461,65 +456,27 @@ async function groupPolicyAttachments(iam: IAMClient, groupName: string, cache: 
   return policies;
 }
 
-async function listUserTags(iam: IAMClient, userName: string): Promise<IamTag[]> {
-  const tags: IamTag[] = [];
-  let marker: string | undefined;
-  do {
-    const page = await withBackoff(() => iam.send(new ListUserTagsCommand({ UserName: userName, Marker: marker })));
-    for (const tag of page.Tags ?? []) {
-      if (tag.Key) tags.push({ key: tag.Key, value: tag.Value ?? "" });
-    }
-    marker = page.IsTruncated ? page.Marker : undefined;
-  } while (marker);
-  return tags;
-}
-
-async function consolePasswordEnabled(iam: IAMClient, userName: string): Promise<boolean | null> {
-  try {
-    await withBackoff(() => iam.send(new GetLoginProfileCommand({ UserName: userName })));
-    return true;
-  } catch (error) {
-    const name = (error as { name?: string }).name ?? "";
-    if (name === "NoSuchEntity" || name === "NoSuchEntityException") return false;
-    return null;
-  }
-}
-
-async function userAccessKeys(iam: IAMClient, userName: string, onKeyDenied: () => void): Promise<{ keys: IamAccessKey[]; newest: string | null; unreadable: boolean }> {
-  const keys: IamAccessKey[] = [];
+async function newestAccessKeyUse(iam: IAMClient, userName: string, onKeyDenied: () => void): Promise<{ newest: string | null; unreadable: boolean }> {
   let newest: string | null = null;
   let unreadable = false;
   try {
     const listed = await withBackoff(() => iam.send(new ListAccessKeysCommand({ UserName: userName })));
     for (const key of listed.AccessKeyMetadata ?? []) {
       if (!key.AccessKeyId) continue;
-      let lastUsedAt: string | null = null;
-      let lastUsedRegion: string | null = null;
-      let lastUsedService: string | null = null;
       try {
         const used = await withBackoff(() => iam.send(new GetAccessKeyLastUsedCommand({ AccessKeyId: key.AccessKeyId })));
-        lastUsedAt = used.AccessKeyLastUsed?.LastUsedDate?.toISOString() ?? null;
-        lastUsedRegion = used.AccessKeyLastUsed?.Region ?? null;
-        lastUsedService = used.AccessKeyLastUsed?.ServiceName ?? null;
+        const at = used.AccessKeyLastUsed?.LastUsedDate?.toISOString() ?? null;
+        if (at && (!newest || newest < at)) newest = at;
       } catch {
         unreadable = true;
         onKeyDenied();
       }
-      if (lastUsedAt && (!newest || newest < lastUsedAt)) newest = lastUsedAt;
-      keys.push({
-        id: key.AccessKeyId,
-        status: key.Status === "Inactive" ? "Inactive" : "Active",
-        createdAt: key.CreateDate?.toISOString() ?? null,
-        lastUsedAt,
-        lastUsedRegion,
-        lastUsedService,
-      });
     }
   } catch {
     unreadable = true;
     onKeyDenied();
   }
-  return { keys, newest, unreadable };
+  return { newest, unreadable };
 }
 
 async function serviceLastAccessed(iam: IAMClient, arn: string, onDenied: () => void): Promise<{ services: IamServiceAccess[]; status: "known" | "unavailable" }> {
@@ -565,15 +522,12 @@ async function oneIamUser(
   onKeyDenied: () => void,
   onAccessDenied: () => void
 ): Promise<IamUserRow> {
-  const [detail, groupPage, attached, inline, tags, mfa, passwordEnabled, access, lastAccessed] = await Promise.all([
+  const [detail, groupPage, attached, inline, access, lastAccessed] = await Promise.all([
     withBackoff(() => iam.send(new GetUserCommand({ UserName: user.userName }))),
     withBackoff(() => iam.send(new ListGroupsForUserCommand({ UserName: user.userName, MaxItems: 100 }))),
     withBackoff(() => iam.send(new ListAttachedUserPoliciesCommand({ UserName: user.userName }))),
     withBackoff(() => iam.send(new ListUserPoliciesCommand({ UserName: user.userName }))),
-    listUserTags(iam, user.userName),
-    withBackoff(() => iam.send(new ListMFADevicesCommand({ UserName: user.userName }))),
-    consolePasswordEnabled(iam, user.userName),
-    userAccessKeys(iam, user.userName, onKeyDenied),
+    newestAccessKeyUse(iam, user.userName, onKeyDenied),
     serviceLastAccessed(iam, user.arn, onAccessDenied),
   ]);
   const passwordAt = detail.User?.PasswordLastUsed?.toISOString() ?? null;
@@ -630,11 +584,6 @@ async function oneIamUser(
     groups,
     policies,
     permissionsBoundary: arnTail(detail.User?.PermissionsBoundary?.PermissionsBoundaryArn),
-    tags,
-    passwordEnabled,
-    passwordLastUsed: passwordAt,
-    mfaDevices: (mfa.MFADevices ?? []).map((device) => device.SerialNumber ?? "").filter(Boolean),
-    accessKeys: access.keys,
     lastAccessed: lastAccessed.services,
     lastAccessedStatus: lastAccessed.status,
     inactive: isInactive(activity),
