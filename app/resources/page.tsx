@@ -104,8 +104,8 @@ const serverColumns: FilterColumn<ServerRow>[] = [
       </>
     ),
   },
-  { id: "type", label: "Type", kind: "text", text: (row) => row.type, render: (row) => row.type },
-  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "type", label: "Type", kind: "choice", text: (row) => row.type, render: (row) => row.type },
+  { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
   {
     id: "state",
     label: "State · CPU (7d)",
@@ -175,7 +175,7 @@ const databaseColumns: FilterColumn<LiveDatabase>[] = [
   {
     id: "engine",
     label: "Engine / Size",
-    kind: "text",
+    kind: "choice",
     text: (row) => `${row.engine} ${row.class}${row.multiAz ? " Multi-AZ" : ""}`,
     render: (row) => (
       <>
@@ -187,7 +187,7 @@ const databaseColumns: FilterColumn<LiveDatabase>[] = [
       </>
     ),
   },
-  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
   { id: "storage", label: "Storage used", kind: "text", text: storageUsedText, render: storageUsedText },
   {
     id: "backups",
@@ -247,7 +247,7 @@ const demoDatabaseColumns: FilterColumn<AwsResource>[] = [
       </>
     ),
   },
-  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
   {
     id: "storage",
     label: "Storage used",
@@ -282,6 +282,46 @@ const demoDatabaseColumns: FilterColumn<AwsResource>[] = [
   },
 ];
 
+type AttentionRow = {
+  id: string;
+  name: string;
+  type: string;
+  region: string;
+  detail: string;
+  href: string | null;
+};
+
+function resourceType(kind: string): string {
+  if (kind === "ec2") return "Server";
+  if (kind === "rds") return "Database";
+  if (kind === "s3") return "Bucket";
+  return "Other";
+}
+
+const attentionColumns: FilterColumn<AttentionRow>[] = [
+  {
+    id: "name",
+    label: "Resource",
+    kind: "text",
+    text: (row) => `${row.name} ${row.detail}`,
+    render: (row) => {
+      const body = (
+        <>
+          <span className="block font-medium text-gray-900">{row.name}</span>
+          <span className="block text-xs text-gray-500">{row.detail}</span>
+        </>
+      );
+      return row.href ? <Link href={row.href}>{body}</Link> : body;
+    },
+  },
+  { id: "type", label: "Type", kind: "choice", text: (row) => row.type, render: (row) => row.type },
+  { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
+];
+
+function byLabel(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
+
 const BUCKET_PROVISION_DETAIL =
   "No configured capacity limit was returned, so this bucket is not marked over- or under-provisioned.";
 
@@ -300,7 +340,7 @@ const bucketColumns: FilterColumn<LiveBucket>[] = [
       </>
     ),
   },
-  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
   {
     id: "size",
     label: "Size / Objects",
@@ -356,7 +396,7 @@ const demoBucketColumns: FilterColumn<AwsResource>[] = [
       </>
     ),
   },
-  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
   {
     id: "health",
     label: "Health",
@@ -387,7 +427,7 @@ const fileSystemColumns: FilterColumn<LiveEFS>[] = [
       </>
     ),
   },
-  { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+  { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
   { id: "size", label: "Size", kind: "text", text: (row) => `${row.sizeGb} GB`, render: (row) => `${row.sizeGb} GB` },
 ];
 
@@ -402,19 +442,15 @@ function diskColumns(instances: { id: string; name: string }[]): FilterColumn<Li
       label: "Disk",
       kind: "text",
       text: (row) => `${row.id} ${row.type}`,
-      render: (row) => (
-        <>
-          <span className="font-mono text-xs text-gray-900">{row.id}</span>
-          <p className="font-sans text-xs text-gray-400">{row.type}</p>
-        </>
-      ),
+      render: (row) => <span className="font-mono text-xs text-gray-900">{row.id}</span>,
     },
+    { id: "type", label: "Type", kind: "choice", text: (row) => row.type, render: (row) => row.type },
     { id: "size", label: "Size", kind: "text", text: (row) => `${row.sizeGb} GB`, render: (row) => `${row.sizeGb} GB` },
-    { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+    { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
     {
       id: "attached",
       label: "Attached to",
-      kind: "text",
+      kind: "choice",
       text: attached,
       render: (row) =>
         row.attachedTo ? attached(row) : <span className="font-medium text-amber-700">Not attached</span>,
@@ -460,7 +496,7 @@ function snapshotColumns(
       text: (row) => (row.store === "ebs" ? "Disk backup" : "Database backup"),
       render: (row) => (row.store === "ebs" ? "Disk backup" : "Database backup"),
     },
-    { id: "region", label: "Region", kind: "text", text: (row) => row.region, render: (row) => row.region },
+    { id: "region", label: "Region", kind: "choice", text: (row) => row.region, render: (row) => row.region },
     { id: "oldest", label: "Oldest", kind: "text", text: (row) => `${row.oldest}d`, render: (row) => `${row.oldest}d` },
     {
       id: "count",
@@ -554,17 +590,23 @@ export default function ResourcesPage() {
             flags: [r.insight],
           }))
           .filter((r) => match(`${r.name} ${r.id} ${r.region}`));
-    return base;
+    return base.slice().sort((a, b) => byLabel(a.name || a.id, b.name || b.id));
   }, [inv, query, serversLive]);
 
   const databases = useMemo(() => {
     if (!databasesLive || !inv) return [];
-    return inv.databases.filter((d) => match(`${d.id} ${d.engine} ${d.class} ${d.region}`));
+    return inv.databases
+      .filter((d) => match(`${d.id} ${d.engine} ${d.class} ${d.region}`))
+      .slice()
+      .sort((a, b) => byLabel(a.id, b.id));
   }, [inv, query, databasesLive]);
 
   const buckets = useMemo(() => {
     if (!bucketsLive || !inv) return [];
-    return inv.buckets.filter((b) => match(`${b.name} ${b.region}`));
+    return inv.buckets
+      .filter((b) => match(`${b.name} ${b.region}`))
+      .slice()
+      .sort((a, b) => byLabel(a.name, b.name));
   }, [inv, query, bucketsLive]);
 
   const disks = useMemo(() => {
@@ -572,7 +614,7 @@ export default function ResourcesPage() {
     return inv.volumes
       .filter((volume) => match(`${volume.id} ${volume.region} ${volume.attachedTo ?? ""} ${volume.type}`))
       .slice()
-      .sort((a, b) => Number(Boolean(a.attachedTo)) - Number(Boolean(b.attachedTo)) || b.sizeGb - a.sizeGb);
+      .sort((a, b) => Number(Boolean(a.attachedTo)) - Number(Boolean(b.attachedTo)) || byLabel(a.id, b.id));
   }, [extrasLive, inv, query]);
 
   const snapshotGroups = useMemo(() => {
@@ -601,22 +643,63 @@ export default function ResourcesPage() {
         items: items.slice().sort((a, b) => b.ageDays - a.ageDays),
       });
     });
-    rows.sort((a, b) => b.count - a.count);
+    rows.sort((a, b) => byLabel(a.source, b.source));
     return rows;
   }, [extrasLive, inv, query]);
 
   const fileSystems = useMemo(() => {
     if (!extrasLive || !inv) return [];
-    return inv.efs.filter((file) => match(`${file.name} ${file.id} ${file.region}`));
+    return inv.efs
+      .filter((file) => match(`${file.name} ${file.id} ${file.region}`))
+      .slice()
+      .sort((a, b) => byLabel(a.name || a.id, b.name || b.id));
   }, [inv, query, extrasLive]);
 
-  const demoFlagged = mockResources.filter((item) => item.status !== "healthy" && match(`${item.name} ${item.id} ${item.insight}`));
-  const demoDatabases = mockResources.filter((item) => item.kind === "rds" && match(`${item.name} ${item.id}`));
-  const demoBuckets = mockResources.filter((item) => item.kind === "s3" && match(`${item.name} ${item.id}`));
+  const demoFlagged = mockResources
+    .filter((item) => item.status !== "healthy" && match(`${item.name} ${item.id} ${item.insight}`))
+    .slice()
+    .sort((a, b) => byLabel(a.name, b.name));
+  const demoDatabases = mockResources
+    .filter((item) => item.kind === "rds" && match(`${item.name} ${item.id}`))
+    .slice()
+    .sort((a, b) => byLabel(a.name, b.name));
+  const demoBuckets = mockResources
+    .filter((item) => item.kind === "s3" && match(`${item.name} ${item.id}`))
+    .slice()
+    .sort((a, b) => byLabel(a.name, b.name));
   const pendingDemo = demoFlagged.filter((item) =>
     item.kind === "ec2" ? !serversLive : item.kind === "rds" ? !databasesLive : !bucketsLive
   );
   const liveFlagged = (inv?.waste ?? []).filter((item) => item.severity !== "healthy");
+  const attentionRows: AttentionRow[] = (
+    inv
+      ? [
+          ...liveFlagged.map((item, index) => ({
+            id: `${item.title}-${index}`,
+            name: item.title,
+            type: resourceType(item.source ?? ""),
+            region: "—",
+            detail: item.detail,
+            href: null,
+          })),
+          ...pendingDemo.map((item) => ({
+            id: item.id,
+            name: item.name,
+            type: resourceType(item.kind),
+            region: item.region,
+            detail: item.insight,
+            href: `/resources/${item.id}`,
+          })),
+        ]
+      : demoFlagged.map((item) => ({
+          id: item.id,
+          name: item.name,
+          type: resourceType(item.kind),
+          region: item.region,
+          detail: item.insight,
+          href: `/resources/${item.id}`,
+        }))
+  ).sort((a, b) => byLabel(a.name, b.name));
 
   const wasteCount = inv
     ? liveFlagged.length + pendingDemo.length
@@ -814,39 +897,13 @@ export default function ResourcesPage() {
 
       {tab === "attention" && (
         <div className="card mt-3 overflow-hidden">
-          {inv ? (
-            <ul className="divide-y divide-gray-100">
-              {liveFlagged.map((item, index) => (
-                <li key={`${item.title}-${index}`} className="px-4 py-3">
-                  <p className="text-sm font-medium">{item.title}</p>
-                  <p className="text-xs text-gray-500">{item.detail}</p>
-                </li>
-              ))}
-              {pendingDemo.map((item) => (
-                <li key={item.id}>
-                  <Link href={`/resources/${item.id}`} className="block px-4 py-3 hover:bg-gray-50">
-                    <span className="block text-sm font-medium">{item.name}</span>
-                    <span className="block text-xs text-gray-500">{item.insight}</span>
-                  </Link>
-                </li>
-              ))}
-              {liveFlagged.length + pendingDemo.length === 0 && (
-                <li className="muted p-8 text-center text-sm">Nothing is flagged.</li>
-              )}
-            </ul>
-          ) : (
-            <ul className="divide-y divide-gray-100">
-              {demoFlagged.map((item) => (
-                <li key={item.id}>
-                  <Link href={`/resources/${item.id}`} className="block px-4 py-3 hover:bg-gray-50">
-                    <span className="block text-sm font-medium">{item.name}</span>
-                    <span className="block text-xs text-gray-500">{item.insight}</span>
-                  </Link>
-                </li>
-              ))}
-              {demoFlagged.length === 0 && <li className="muted p-8 text-center text-sm">Nothing is flagged.</li>}
-            </ul>
-          )}
+          <FilterTable
+            rows={attentionRows}
+            rowKey={(row) => row.id}
+            minWidth={760}
+            empty="Nothing is flagged."
+            columns={attentionColumns}
+          />
         </div>
       )}
 
