@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { explainCredentialFailure } from "../lib/credential-errors";
-import { accountCredentials, clearAccount, getAccount, saveAccount } from "../lib/account-store";
+import { accountCredentials, clearAccount, getAccount, saveAccount, setLiveSync, toPublic } from "../lib/account-store";
 
 test("temporary keys ask for the session token instead of saying the secret is wrong", () => {
   const message = explainCredentialFailure("InvalidClientTokenId", "ASIAEXAMPLEKEY000000", false);
@@ -43,6 +43,29 @@ test("stored temporary keys keep the session token on later AWS calls", () => {
     assert.equal(accountCredentials(stored).sessionToken, "session-token");
     clearAccount();
   } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("live data can be switched on for keys that come from the environment", () => {
+  const saved = {
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+    AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
+  };
+  process.env.AWS_ACCESS_KEY_ID = "AKIAEXAMPLEKEY000000";
+  process.env.AWS_SECRET_ACCESS_KEY = "secret";
+  delete process.env.AWS_SESSION_TOKEN;
+  try {
+    assert.equal(toPublic().configured, true);
+    assert.equal(setLiveSync(true).liveSync, true);
+    assert.equal(toPublic().liveSync, true);
+    assert.equal(setLiveSync(false).liveSync, false);
+  } finally {
+    setLiveSync(false);
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

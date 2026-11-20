@@ -59,6 +59,7 @@ export function mergeInventory(prev: Inventory | null, next: Inventory, scope: I
         ...instance,
         diskGb: instance.diskGb || disks.get(instance.id) || 0,
       })),
+      autoScalingGroups: next.autoScalingGroups ?? [],
       waste,
       scannedScopes,
       detailScan,

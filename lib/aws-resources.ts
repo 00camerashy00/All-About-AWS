@@ -21,7 +21,12 @@ import {
 import {
   CloudWatchClient,
   GetMetricDataCommand,
+  ListMetricsCommand,
 } from "@aws-sdk/client-cloudwatch";
+import {
+  AutoScalingClient,
+  DescribeAutoScalingGroupsCommand,
+} from "@aws-sdk/client-auto-scaling";
 import {
   DescribeLoadBalancersCommand as DescribeV2LBsCommand,
   ElasticLoadBalancingV2Client,
@@ -33,6 +38,7 @@ import {
 import { DescribeFileSystemsCommand, EFSClient } from "@aws-sdk/client-efs";
 import { DescribeServerCommand, ListServersCommand, TransferClient } from "@aws-sdk/client-transfer";
 import { accountClientConfig } from "@/lib/aws";
+import { autoScalingEnabled } from "@/lib/attention";
 import { RDS_MAX_CONNECTIONS } from "@/lib/monitoring-config";
 
 function clientConfig(region?: string) {
@@ -52,8 +58,19 @@ export interface LiveInstance {
   launchDays: number;
   cpuAvg7d: number | null;
   diskGb: number;
+  /** Latest CloudWatch agent disk_used_percent, fullest mount. Null when the agent did not report it. */
+  diskUsedPct: number | null;
+  /** Set when this instance belongs to an auto-scaling group that can still scale. */
+  autoScalingGroup: string | null;
   status: Health;
   flags: string[];
+}
+
+export interface LiveAsg {
+  name: string;
+  region: string;
+  enabled: boolean;
+  instanceIds: string[];
 }
 
 export interface LiveDatabase {
@@ -297,6 +314,117 @@ async function rdsWorkload(
   return out;
 }
 
+async function diskUsedForInstances(region: string, ids: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (ids.length === 0) return out;
+  const wanted = new Set(ids);
+  try {
+    const cw = new CloudWatchClient(clientConfig(region));
+    const metrics: { instanceId: string; dimensions: { Name: string; Value: string }[] }[] = [];
+    let next: string | undefined;
+    let pages = 0;
+    do {
+      const res = await cw.send(
+        new ListMetricsCommand({
+          Namespace: "CWAgent",
+          MetricName: "disk_used_percent",
+          NextToken: next,
+        })
+      );
+      for (const metric of res.Metrics ?? []) {
+        const instanceId = metric.Dimensions?.find((dimension) => dimension.Name === "InstanceId")?.Value;
+        if (!instanceId || !wanted.has(instanceId)) continue;
+        const dimensions: { Name: string; Value: string }[] = [];
+        for (const dimension of metric.Dimensions ?? []) {
+          if (dimension.Name && dimension.Value) dimensions.push({ Name: dimension.Name, Value: dimension.Value });
+        }
+        metrics.push({ instanceId, dimensions });
+      }
+      next = res.NextToken;
+      pages++;
+    } while (next && pages < 20);
+
+    const end = new Date();
+    const start = new Date(end.getTime() - 60 * 60 * 1000);
+    for (let offset = 0; offset < metrics.length; offset += 100) {
+      const slice = metrics.slice(offset, offset + 100);
+      const res = await cw.send(
+        new GetMetricDataCommand({
+          StartTime: start,
+          EndTime: end,
+          MetricDataQueries: slice.map((metric, index) => ({
+            Id: `d${index}`,
+            Label: metric.instanceId,
+            MetricStat: {
+              Metric: {
+                Namespace: "CWAgent",
+                MetricName: "disk_used_percent",
+                Dimensions: metric.dimensions,
+              },
+              Period: 300,
+              Stat: "Maximum" as const,
+            },
+          })),
+        })
+      );
+      for (const row of res.MetricDataResults ?? []) {
+        const value = row.Values?.[0];
+        if (!row.Label || typeof value !== "number") continue;
+        const prev = out.get(row.Label);
+        if (prev == null || value > prev) out.set(row.Label, Math.round(value));
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+  return out;
+}
+
+async function regionHasAsg(region: string): Promise<boolean> {
+  try {
+    const client = new AutoScalingClient(clientConfig(region));
+    const res = await client.send(new DescribeAutoScalingGroupsCommand({ MaxRecords: 1 }));
+    return (res.AutoScalingGroups ?? []).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function describeAsgs(region: string): Promise<LiveAsg[] | null> {
+  try {
+    const client = new AutoScalingClient(clientConfig(region));
+    const groups: LiveAsg[] = [];
+    let token: string | undefined;
+    do {
+      const res = await client.send(
+        new DescribeAutoScalingGroupsCommand({ NextToken: token, MaxRecords: 100 })
+      );
+      for (const group of res.AutoScalingGroups ?? []) {
+        const suspended: string[] = [];
+        for (const process of group.SuspendedProcesses ?? []) {
+          if (process.ProcessName) suspended.push(process.ProcessName);
+        }
+        const instanceIds: string[] = [];
+        for (const member of group.Instances ?? []) {
+          if (member.InstanceId) instanceIds.push(member.InstanceId);
+        }
+        const name = group.AutoScalingGroupName ?? "";
+        if (!name) continue;
+        groups.push({
+          name,
+          region,
+          enabled: autoScalingEnabled(suspended),
+          instanceIds,
+        });
+      }
+      token = res.NextToken;
+    } while (token);
+    return groups;
+  } catch {
+    return null;
+  }
+}
+
 // Phase 1: cheap existence sweep. Answers only "does anything live here?"
 // so Phase 2 (CloudWatch, snapshot pagination, S3 detail) runs solely
 // where it can find something. One fast pass over all regions.
@@ -305,10 +433,11 @@ async function sweepRegion(region: string, scope?: InventoryScope): Promise<bool
     try {
       const ec2 = new EC2Client(clientConfig(region));
       const found = await ec2.send(new DescribeInstancesCommand({ MaxResults: 5 }));
-      return (found.Reservations ?? []).flatMap((reservation) => reservation.Instances ?? []).length > 0;
+      if ((found.Reservations ?? []).flatMap((reservation) => reservation.Instances ?? []).length > 0) return true;
     } catch {
-      return false;
+      /* still check auto scaling */
     }
+    return regionHasAsg(region);
   }
   if (scope === "rds") {
     try {
@@ -347,7 +476,7 @@ async function sweepRegion(region: string, scope?: InventoryScope): Promise<bool
     return false;
   }
   try {
-    const [v2, classic, fs, t] = await Promise.all([
+    const [v2, classic, fs, t, asg] = await Promise.all([
       new ElasticLoadBalancingV2Client(clientConfig(region))
         .send(new DescribeV2LBsCommand({}))
         .then((r) => (r.LoadBalancers ?? []).length)
@@ -364,8 +493,9 @@ async function sweepRegion(region: string, scope?: InventoryScope): Promise<bool
         .send(new ListServersCommand({ MaxResults: 5 }))
         .then((r) => (r.Servers ?? []).length)
         .catch(() => 0),
+      regionHasAsg(region).then((found) => (found ? 1 : 0)),
     ]);
-    return v2 > 0 || classic > 0 || fs > 0 || t > 0;
+    return v2 > 0 || classic > 0 || fs > 0 || t > 0 || asg > 0;
   } catch {
     return false;
   }
@@ -379,6 +509,7 @@ async function scanRegion(region: string, acc: {
   lbs: LiveLB[];
   efs: LiveEFS[];
   transfer: LiveTransfer[];
+  autoScalingGroups: LiveAsg[];
   waste: WasteItem[];
 }, scope?: InventoryScope) {
   const ec2 = new EC2Client(clientConfig(region));
@@ -399,6 +530,8 @@ async function scanRegion(region: string, acc: {
           if (state === "terminated" || state === "shutting-down") continue;
           const name =
             i.Tags?.find((t) => t.Key === "Name")?.Value ?? i.InstanceId ?? "";
+          const autoScalingGroup =
+            i.Tags?.find((t) => t.Key === "aws:autoscaling:groupName")?.Value ?? null;
           // disk size refined after volumes are collected (see buildInventory)
           found.push({
             kind: "ec2",
@@ -411,6 +544,8 @@ async function scanRegion(region: string, acc: {
             launchDays: daysSince(i.LaunchTime),
             cpuAvg7d: null,
             diskGb: 0,
+            diskUsedPct: null,
+            autoScalingGroup,
             status: "healthy",
             flags: [],
           });
@@ -418,13 +553,32 @@ async function scanRegion(region: string, acc: {
       }
       token = res.NextToken;
     } while (token);
-    const cpu = await cpuForInstances(
-      region,
-      found.filter((f) => f.state === "running").map((f) => f.id)
-    );
+    const [cpu, disk, groups] = await Promise.all([
+      cpuForInstances(
+        region,
+        found.filter((f) => f.state === "running").map((f) => f.id)
+      ),
+      diskUsedForInstances(
+        region,
+        found.map((f) => f.id)
+      ),
+      describeAsgs(region),
+    ]);
+    if (groups) {
+      acc.autoScalingGroups.push(...groups);
+      const enabledByInstance = new Map<string, string>();
+      for (const group of groups) {
+        if (!group.enabled) continue;
+        for (const id of group.instanceIds) enabledByInstance.set(id, group.name);
+      }
+      for (const instance of found) {
+        instance.autoScalingGroup = enabledByInstance.get(instance.id) ?? null;
+      }
+    }
     for (const f of found) {
       const c = cpu.get(f.id) ?? null;
       f.cpuAvg7d = c;
+      f.diskUsedPct = disk.get(f.id) ?? null;
       if (f.state !== "running") {
         f.status = "attention";
         f.flags.push(`Stopped — server is off but its disks keep billing`);
@@ -784,6 +938,7 @@ export interface Inventory {
   lbs: LiveLB[];
   efs: LiveEFS[];
   transfer: LiveTransfer[];
+  autoScalingGroups: LiveAsg[];
   waste: WasteItem[];
 }
 
@@ -879,6 +1034,7 @@ export async function buildInventory(scope?: InventoryScope): Promise<Inventory>
     lbs: [] as LiveLB[],
     efs: [] as LiveEFS[],
     transfer: [] as LiveTransfer[],
+    autoScalingGroups: [] as LiveAsg[],
     waste: [] as WasteItem[],
   };
   const scannedScopes: InventoryScope[] = scope ? [scope] : ["ec2", "rds", "s3"];

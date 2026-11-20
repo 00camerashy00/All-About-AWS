@@ -36,10 +36,6 @@ export async function PATCH(request: Request) {
   if (typeof body?.liveSync !== "boolean") {
     return NextResponse.json({ error: "invalid_body" }, { status: 400 });
   }
-  resetInventoryCache();
-  resetUsersCache();
-  resetMonitoringCache();
-  resetAlarmsCache();
   return NextResponse.json(setLiveSync(body.liveSync));
 }
 

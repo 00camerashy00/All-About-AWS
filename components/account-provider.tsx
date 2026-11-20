@@ -40,6 +40,15 @@ const EMPTY: PublicAccount = {
 };
 
 const AccountContext = createContext<AccountContextValue | null>(null);
+const LIVE_POLL_MS = 60_000;
+
+async function refreshLivePages(): Promise<boolean> {
+  const results = await Promise.allSettled([
+    fetch("/api/users?refresh=1"),
+    fetch("/api/resources?refresh=1"),
+  ]);
+  return results.some((result) => result.status === "fulfilled" && result.value.ok);
+}
 
 export function AccountProvider({ children }: { children: React.ReactNode }) {
   const [account, setAccount] = useState<PublicAccount>(EMPTY);
@@ -91,9 +100,30 @@ export function AccountProvider({ children }: { children: React.ReactNode }) {
     if (!res.ok) return false;
     const json = (await res.json()) as PublicAccount;
     setAccount(json);
-    if (liveSync) setRevision((n) => n + 1);
     return true;
   }, []);
+
+  useEffect(() => {
+    if (!ready || !account.configured || !account.liveSync) return;
+    let cancelled = false;
+    let running = false;
+    const poll = async () => {
+      if (running) return;
+      running = true;
+      try {
+        const ok = await refreshLivePages();
+        if (!cancelled && ok) setRevision((n) => n + 1);
+      } finally {
+        running = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), LIVE_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [account.configured, account.liveSync, ready]);
 
   const clearKeys = useCallback(async () => {
     const res = await fetch("/api/account", { method: "DELETE" });

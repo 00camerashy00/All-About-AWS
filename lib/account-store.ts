@@ -21,6 +21,7 @@ export interface PublicAccount {
 
 const globalStore = globalThis as typeof globalThis & {
   __awsDashAccount?: StoredAccount | null;
+  __awsDashLiveSync?: boolean;
 };
 
 function readAccount() {
@@ -76,7 +77,7 @@ export function toPublic(value: StoredAccount | null = getAccount()): PublicAcco
   const source = fromEnv && fromEnv.accessKeyId === value.accessKeyId ? "env" : "session";
   return {
     configured: true,
-    liveSync: value.liveSync,
+    liveSync: globalStore.__awsDashLiveSync === true,
     region: value.region,
     keyHint: id.length > 4 ? id.slice(-4) : id,
     source,
@@ -101,13 +102,13 @@ export function saveAccount(input: {
 }
 
 export function setLiveSync(liveSync: boolean): PublicAccount {
-  const account = readAccount();
-  if (!account) throw new Error("no_account");
-  writeAccount({ ...account, liveSync });
+  if (!getAccount()) throw new Error("no_account");
+  globalStore.__awsDashLiveSync = liveSync;
   return toPublic();
 }
 
 export function clearAccount(): PublicAccount {
+  globalStore.__awsDashLiveSync = false;
   writeAccount(null);
   return toPublic();
 }

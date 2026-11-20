@@ -3,9 +3,10 @@ import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { accountClientConfig, isCredsError } from "@/lib/aws";
 import { getAccount } from "@/lib/account-store";
 import { explainCredentialFailure } from "@/lib/credential-errors";
-import { buildInventory, type InventoryScope } from "@/lib/aws-resources";
+import { buildInventory, type Inventory, type InventoryScope } from "@/lib/aws-resources";
 import { asInventory, mergeInventory } from "@/lib/inventory-merge";
 import { readInventoryCache, updateInventoryCache } from "@/app/api/resources/cache";
+import { notifyAttention, type AttentionMailResult } from "@/lib/attention-mail";
 
 export const dynamic = "force-dynamic";
 // Inventory scan can take a while across all regions
@@ -39,6 +40,10 @@ export async function GET(request: Request) {
     const stored = await updateInventoryCache((current) =>
       scope ? mergeInventory(asInventory(current), inv, scope) : inv
     );
+    const attentionMail = await mailAfterScan(inv);
+    if (attentionMail?.warning && stored && typeof stored === "object") {
+      return NextResponse.json({ ...(stored as Record<string, unknown>), attentionMail });
+    }
     return NextResponse.json(stored);
   } catch (e) {
     const name = (e as { name?: string })?.name ?? "Unknown";
@@ -53,6 +58,16 @@ export async function GET(request: Request) {
       },
       { status: isCredsError(e) ? 401 : 502 }
     );
+  }
+}
+
+async function mailAfterScan(inv: Inventory): Promise<AttentionMailResult | null> {
+  try {
+    return await notifyAttention(inv);
+  } catch (error) {
+    const name = (error as { name?: string })?.name ?? "error";
+    console.warn("attention email not sent:", name);
+    return { sent: false, warning: "The attention email could not be sent. The scan completed." };
   }
 }
 

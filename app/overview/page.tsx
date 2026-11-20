@@ -225,11 +225,7 @@ export default function OverviewPage() {
           </div>
           {account.configured ? (
             <RescanButton label="Rescan All" busy={Boolean(busy.all)} onClick={onRescanAll} />
-          ) : (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-2 text-xs font-semibold text-gray-600 ring-1 ring-gray-200">
-              Demo data
-            </span>
-          )}
+          ) : null}
         </form>
       </div>
 

@@ -22,6 +22,9 @@ yarn-error.log*
 !.env.example
 *.pem
 
+# attention-email dedup (resource ids and timestamps only)
+.data/
+
 # local Docker overrides
 docker-compose.override.yml
 

@@ -516,15 +516,21 @@ export default function ResourcesPage() {
   const [inv, setInv] = useState<Inventory | null>(null);
   const [loading, setLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [mailWarning, setMailWarning] = useState<string | null>(null);
 
   const openTab = (next: Tab) => setTab((current) => (current === next ? null : next));
 
   const load = useCallback(async (refresh: boolean) => {
-    if (refresh) setLoading(true);
+    if (refresh) {
+      setLoading(true);
+      setMailWarning(null);
+    }
     setLiveError(null);
     try {
       const res = await fetch(refresh ? "/api/resources?refresh=1" : "/api/resources");
       const json = await res.json();
+      const warning = typeof json.attentionMail?.warning === "string" ? json.attentionMail.warning : null;
+      setMailWarning(warning);
       if (res.ok && json.live) setInv(json as Inventory);
       else if (json.error === "not_scanned" || json.error === "sync_disabled") setInv(null);
       else
@@ -536,6 +542,7 @@ export default function ResourcesPage() {
         );
     } catch {
       setLiveError("Couldn't read the live inventory. Showing demo data.");
+      setMailWarning(null);
     } finally {
       if (refresh) setLoading(false);
     }
@@ -555,6 +562,7 @@ export default function ResourcesPage() {
       setInv(null);
       setLoading(false);
       setLiveError(null);
+      setMailWarning(null);
       return;
     }
     load(false);
@@ -640,7 +648,7 @@ export default function ResourcesPage() {
         region: items[0].region,
         count: items.length,
         oldest,
-        items: items.slice().sort((a, b) => b.ageDays - a.ageDays),
+        items: items.slice().sort((a, b) => a.ageDays - b.ageDays),
       });
     });
     rows.sort((a, b) => byLabel(a.source, b.source));
@@ -756,6 +764,11 @@ export default function ResourcesPage() {
       {!loading && liveError && (
         <div className="mb-3">
           <InsightBanner tone="warn" title="Live data unavailable" body={liveError} />
+        </div>
+      )}
+      {!loading && mailWarning && (
+        <div className="mb-3">
+          <InsightBanner tone="warn" title="Attention email was not sent" body={mailWarning} />
         </div>
       )}
 

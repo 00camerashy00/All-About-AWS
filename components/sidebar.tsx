@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { clsx } from "clsx";
-import { useAccount } from "@/components/account-provider";
 import {
   LayoutDashboard,
+  Link2,
   Server,
   Users,
   Cloud,
@@ -15,11 +15,11 @@ const links = [
   { href: "/overview", label: "Overview", icon: LayoutDashboard },
   { href: "/users", label: "Users", icon: Users },
   { href: "/resources", label: "Resources", icon: Server },
+  { href: "/secure-link", label: "Secure Link", icon: Link2 },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { account } = useAccount();
   return (
     <aside className="hidden w-60 shrink-0 border-r border-gray-200/80 bg-white lg:block">
       <div className="flex h-16 items-center gap-2 border-b border-gray-100 px-5">
@@ -52,15 +52,6 @@ export function Sidebar() {
           );
         })}
       </nav>
-      {!account.configured && (
-        <div className="m-3 rounded-2xl bg-gray-50 p-4 ring-1 ring-gray-200/70">
-          <p className="text-xs font-semibold">Demo data</p>
-          <p className="mt-1 text-xs leading-relaxed text-gray-500">
-            Overview, Users, and Resources use sample figures until .env.local
-            has keys and you press Rescan on that page.
-          </p>
-        </div>
-      )}
     </aside>
   );
 }
